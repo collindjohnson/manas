@@ -1,0 +1,46 @@
+{
+  "name": "manas",
+  "version": "0.1.0",
+  "description": "Local-first, Git-backed knowledge system for syncing, indexing, and searching AI conversations.",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/collindjohnson/manas.git"
+  },
+  "homepage": "https://github.com/collindjohnson/manas#readme",
+  "bugs": {
+    "url": "https://github.com/collindjohnson/manas/issues"
+  },
+  "type": "module",
+  "bin": {
+    "manas": "src/cli.ts"
+  },
+  "exports": {
+    ".": ".\u002fsrc\u002findex.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "format:check": "bun run src/format-check.ts",
+    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "runbooks:check": "bun run src/runbooks/validate.ts",
+    "postgres:check": "bun run src/parity/postgres-check.ts",
+    "postgres:docker": "bash scripts/postgres-contract.sh",
+    "secrets:check": "bun run src/parity/secret-scan.ts",
+    "parity:check": "bun run src/parity/verify.ts",
+		"parity:verify": "bun run src/parity/verify.ts --require-verified && bun run runbooks:check && bun run postgres:docker && bun run secrets:check && bun test && bun run typecheck && bun run format:check && bun run build && git diff --check",
+    "full-verification": "bun run parity:verify"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@electric-sql/pglite-pgvector": "^0.0.5",
+    "@types/pg": "^8.20.0",
+    "pg": "^8.22.0"
+  }
+}

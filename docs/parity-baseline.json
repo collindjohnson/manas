@@ -1,0 +1,55 @@
+{
+  "recordedAt": "2026-07-27",
+  "manifest": {
+    "path": "docs/parity-manifest.json",
+    "capabilityCount": 27,
+    "counts": {
+      "missing": 0,
+      "partial": 0,
+      "implemented": 0,
+      "verified": 27
+    },
+    "remaining": []
+  },
+  "fullGate": {
+    "command": "bun run parity:verify",
+		"status": "ready",
+			"tests": {
+				"files": 69,
+				"passed": 270,
+      "failed": 0,
+				"expectations": 1228
+    },
+    "checks": {
+      "typecheck": "pass",
+      "formatCheck": "pass",
+      "build": "pass",
+      "gitDiffCheck": "pass",
+      "analyticsPersistence": "pass: PGLite scoped cache, facts, claims, timelines, source failures, and embedding coverage",
+		"projectionContract": "pass: PGLite isolated activation, revisions, graph nodes, exact citations, tenant filtering, tenant/brain-scoped model-specific vector replacement, durable skill feedback, durable admin action receipts, and source cursor contracts",
+		"hybridRetrieval": "pass: PGLite lexical/vector/graph/source/recency fusion, explainable scores, access-label filtering, and exact Git-verified citations",
+		"sessionLifecycle": "pass: durable session idle renewal is atomic and capped by absolute expiry",
+      "transportContract": "pass: 20 deterministic remote-safe catalog operations matched direct, CLI, stdio MCP, HTTP MCP, and thin-client results; MCP lifecycle and session-handshake contracts pass",
+      "archiveSecurity": "pass: bounded ZIP entry count/size/nesting/encryption/symlink/traversal checks",
+		"dependencyFailurePolicy": "pass: cancel, dead-letter, and degraded continuation are durable and tested",
+		"parityJobHandlers": "pass: all 23 parity types have bounded registry dispatch, local provider routes, source-to-projection lifecycle coverage, audit metadata, and rollback receipts",
+      "accessTokenBinding": "pass: optional durable PAT user binding and hosted operation-authorizer hook",
+      "extractionQuarantine": "pass: high-confidence credentials in extracted Markdown are quarantined before commit",
+      "schemaContextPropagation": "pass: active schema-pack identity survives ingestion queue handoff, isolated/schema-only incremental projection, analytics cache keys, facts/claims/timelines, graph metadata, and citations",
+		"postgresContract": "pass: disposable PostgreSQL 16 with pgvector reached schema v24, matched isolated and incremental projection/retrieval citation contracts, claimed a real queue row with FOR UPDATE SKIP LOCKED, and enforced tenant plus authorized/unauthorized user and brain isolation under a non-superuser RLS role",
+		"stdioCancellation": "pass: concurrent local MCP requests propagate AbortSignal and return JSON-RPC -32800 cancellation errors",
+		"httpCancellation": "pass: authenticated thin-client session calls send notifications/cancelled when aborted",
+		"sourceConformance": "pass: reusable descriptor, deterministic scan, normalization, hash, provenance, and checkpoint gate covers built-in adapters",
+		"autonomousRecovery": "pass: durable agent proposals survive control-plane restart and invalid state transitions are rejected"
+    },
+    "releaseGate": {
+      "command": "bun run parity:verify",
+      "status": "ready",
+		"reason": "all 27 capabilities are verified; manifest, tests, PostgreSQL, offline local-AI, security, migration, transport, typecheck, format, build, secret, runbook, and diff gates pass"
+    }
+  },
+  "worktree": {
+    "status": "uncommitted project content",
+    "legacyDataPreserved": true
+  }
+}
