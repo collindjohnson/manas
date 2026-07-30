@@ -6,7 +6,25 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+	  "@manas/setup-archive": ["src/setup-archive.ts"],
+	  "@manas/setup-sources": ["src/setup-sources.ts"],
+	  "@manas/scheduler-activation": ["src/scheduler-activation.ts"],
+	  "@manas-brain-*": ["src/brain/*"],
+      "@manas/*": ["src/*"],
+      "@manas/setup-persistence": ["src/setup-persistence.ts"],
+      "@manas/legacy": ["src/legacy.ts"],
+      "@manas/scheduler-receipt": ["src/scheduler-receipt.ts"],
+      "@manas/installer": ["src/installer.ts"],
+      "@manas/setup-config": ["src/setup-config.ts"],
+      "@manas/launch-agent": ["src/launch-agent.ts"],
+      "@manas/executable": ["src/executable.ts"],
+      "@manas-version": ["src/version.ts"],
+      "@manas-pglite-assets/*": ["node_modules/@electric-sql/pglite/dist/*"],
+      "@manas-pgvector-assets/*": ["node_modules/@electric-sql/pglite-pgvector/dist/*"]
+    }
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

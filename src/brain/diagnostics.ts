@@ -1,3 +1,4 @@
+import * as sourceHealthModule from "./source-health";
 type Repository = {
 	head(): Promise<string | undefined>;
 	verify(ref?: string): Promise<{ valid: boolean; issues: string[]; commit: string }>;
@@ -6,7 +7,6 @@ type Repository = {
 	listPages(includeDeleted?: boolean): Promise<Array<{ deleted?: boolean }>>;
 };
 type Store = { query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]> };
-const sourceHealthModule = await import([".", "source-health"].join(String.fromCharCode(47)));
 
 export async function diagnoseBrain(repository: Repository, store?: Store): Promise<{ ok: boolean; repository: { head?: string; valid: boolean; issues: string[]; pages: { active: number; deleted: number }; schemaPack: { id: string; version: string }; sources: number }; projection?: { latestCommit?: string; status?: string; current: boolean; jobs: Record<string, number>; sources: unknown[] }; warnings: string[] }> {
 	const head = await repository.head();

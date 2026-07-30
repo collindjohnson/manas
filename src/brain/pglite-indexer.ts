@@ -1,3 +1,4 @@
+import * as hybridModule from "./hybrid";
 import { createHash, randomUUID } from "node:crypto";
 import { autocutHybridResults, reciprocalRankFusion, rerankCandidates, type HybridResult, type RankedCandidate } from "./hybrid";
 import { semanticSearch } from "./local-embeddings";
@@ -366,7 +367,6 @@ export async function searchBrainRepository(store: Store, query: string, limit =
 }
 
 export async function searchExpandedBrainRepository(store: Store, query: string, limit = 20, brainId?: string, allowedAccessLabels?: string[], tenantId = "local"): Promise<{ variants: string[]; results: ProjectedSearchResult[] }> {
-	const hybridModule = await import([".", "hybrid"].join(String.fromCharCode(47)));
 	const variants = hybridModule.expandLocalQuery(query);
 	const scores = new Map<string, { result: ProjectedSearchResult; score: number }>();
 	for (const variant of variants) {
@@ -499,7 +499,6 @@ export async function searchVerifiedBrainRepository(store: Store, repository: Re
 }
 
 export async function rerankProjectedSearchResults(provider: { rerank(query: string, documents: Array<{ id: string; text: string }>): Promise<Array<{ id: string; score: number }>> }, query: string, results: ProjectedSearchResult[]): Promise<Array<ProjectedSearchResult & { rerankerScore: number }>> {
-	const hybridModule = await import([".", "hybrid"].join(String.fromCharCode(47)));
 	return hybridModule.rerankCandidates(provider, query, results.map((result) => ({ ...result, documentId: result.citation.documentId })));
 }
 

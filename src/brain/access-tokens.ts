@@ -1,5 +1,5 @@
+import * as auditModule from "./audit";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-const auditModule = await import([".", "audit"].join(String.fromCharCode(47)));
 
 type Store = { query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]> };
 export type AccessScope = "read" | "write" | "admin";

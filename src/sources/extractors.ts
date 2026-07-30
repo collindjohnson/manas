@@ -1,3 +1,4 @@
+import * as auditModule from "../brain/audit";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { createHash } from "node:crypto";
@@ -132,7 +133,6 @@ export interface ExtractionQuarantine {
 export function createAuditExtractionQuarantineSink(store: { query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]> }, tenantId = "local"): ExtractionQuarantine {
 	if (!tenantId.trim()) throw new Error("extraction quarantine tenant is required");
 	return { record: async (event) => {
-		const auditModule = await import(["..", "brain", "audit"].join(String.fromCharCode(47)));
 		await auditModule.recordAuditEvent(store, { tenantId, action: "extraction.quarantined", subjectId: event.path, metadata: { extractor: event.extractor, reason: event.reason } });
 	} };
 }

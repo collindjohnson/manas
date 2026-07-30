@@ -1,3 +1,4 @@
+import * as embeddingModule from "./local-embeddings";
 type Store = {
 	query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]>;
 	exec(sql: string): Promise<void>;
@@ -83,7 +84,6 @@ export async function buildAndActivateEmbeddingModel(store: Store, provider: Emb
 	const fingerprint = target.fingerprint!;
 	const totalRows = await store.query<{ count: number | string }>("SELECT COUNT(*) AS count FROM brain_chunks c JOIN brain_documents d ON d.id = c.document_id WHERE d.tenant_id = $1 AND d.brain_id = $2 AND d.deleted_at IS NULL", [tenantId, brainId]);
 	const totalChunks = Number(totalRows[0]?.count ?? 0);
-	const embeddingModule = await import("./local-embeddings");
 	await embeddingModule.indexLocalEmbeddings(store, provider, batchSize, { tenantId, brainId });
 	const coveredRows = await store.query<{ count: number | string }>("SELECT COUNT(*) AS count FROM brain_chunk_embeddings e JOIN brain_chunks c ON c.id = e.chunk_id JOIN brain_documents d ON d.id = c.document_id WHERE e.tenant_id = $1 AND e.brain_id = $2 AND e.model_fingerprint = $3 AND d.deleted_at IS NULL", [tenantId, brainId, fingerprint]);
 	const coveredChunks = Number(coveredRows[0]?.count ?? 0);

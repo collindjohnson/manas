@@ -1,15 +1,19 @@
+import * as serverModule from "./server";
+import { BrainRepository } from "../brain/repository";
+import * as operationsModule from "../brain/operations";
+import * as servicesModule from "../brain/services";
+import * as protocolModule from "./protocol";
+import * as errorsModule from "./errors";
 import { createHash } from "node:crypto";
+import type { Config } from "../config";
 import type { OperationAuthorization, OperationContext, OperationDefinition, OperationRegistry } from "../brain/operation-registry";
 
-type Config = Record<string, unknown>;
 type Request = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: unknown };
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 
-const serverModule = await import([".", "server"].join(String.fromCharCode(47)));
-const { BrainRepository } = await import(["..", "brain", "repository"].join(String.fromCharCode(47)));
-const operationsModule = await import(["..", "brain", "operations"].join(String.fromCharCode(47)));
-const servicesModule = await import(["..", "brain", "services"].join(String.fromCharCode(47)));
-const httpOperationNames = new Set<string>([...operationsModule.brainRepositoryOperationNames, "search", "think", "related", "status", "health"]);
+const httpOperationNames = new Set<string>([...operationsModule.brainRepositoryOperationNames, "search", "think", "related", "sources_list", "status", "health"]);
+import { MANAS_VERSION } from "@manas-version";
+
 export type McpScope = "read" | "write" | "admin";
 export interface McpRateLimit { maxRequests: number; windowMs: number; }
 type RateLimitBucket = { count: number; resetAt: number };
@@ -109,21 +113,19 @@ function response(id: Request["id"], result?: unknown, error?: { code: number; m
 }
 
 function requestedProtocolVersion(request: Request): string {
-	if (!isRecord(request.params) || request.params.protocolVersion === undefined) return MCP_PROTOCOL_VERSION;
-	if (request.params.protocolVersion !== MCP_PROTOCOL_VERSION) throw new Error("unsupported MCP protocol version");
-	return MCP_PROTOCOL_VERSION;
+	return protocolModule.negotiateMcpProtocolVersion(request.params);
 }
 
 function localBrainRepository() {
 	const root = process.env.MANAS_BRAIN_REPOSITORY;
-	if (!root) throw new Error("brain repository is not configured");
+	if (!root) throw errorsModule.mcpConfigurationUnavailableError();
 	return new BrainRepository(root);
 }
 
-export async function handleMcpHttpRequest(config: Config, request: Request, operationRegistry?: OperationRegistry, operationContext?: Partial<OperationContext>): Promise<unknown> {
+export async function handleMcpHttpRequest(config: Config | Record<string, never>, request: Request, operationRegistry?: OperationRegistry, operationContext?: Partial<OperationContext>): Promise<unknown> {
 	if (request.method === "ping") return {};
 	if (request.method === "notifications/initialized" || request.method === "notifications/cancelled") return {};
-	if (request.method === "initialize") return { protocolVersion: requestedProtocolVersion(request), capabilities: { tools: {} }, serverInfo: { name: "manas", version: "0.1.0" } };
+	if (request.method === "initialize") return { protocolVersion: requestedProtocolVersion(request), capabilities: { tools: {} }, serverInfo: { name: "manas", version: MANAS_VERSION } };
 	if (request.method === "tools/list") {
 		const legacy = serverModule.registeredTools.filter((tool: { name: string }) => httpOperationNames.has(tool.name)).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({ ...tool, _meta: { requiredScope: requiredMcpScope(tool.name, operationRegistry) } }));
 		const generated = operationRegistry?.list().filter((definition) => definition.trustBoundary !== "local-only").map((definition) => ({ name: definition.name, description: definition.description, inputSchema: definition.inputSchema, _meta: { requiredScope: definition.requiredScope } })) ?? [];
@@ -156,18 +158,30 @@ export async function handleMcpHttpRequest(config: Config, request: Request, ope
 	}
 	if (name === "search") {
 		if (typeof args.query !== "string" || !args.query.trim()) throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.searchService(config, args.query, args)) }] };
+		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.searchService(config as Config, args.query, args)) }] };
 	}
 	if (name === "think") {
 		if (typeof args.question !== "string" || !args.question.trim()) throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.thinkService(config, args.question)) }] };
+		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.thinkService(config as Config, args.question)) }] };
 	}
 	if (name === "related") {
 		if (typeof args.nessieId !== "string") throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.relatedService(config, args.nessieId)) }] };
+		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.relatedService(config as Config, args.nessieId)) }] };
 	}
-	if (name === "status") return { content: [{ type: "text", text: JSON.stringify(await servicesModule.statusService(config)) }] };
-	if (name === "health") return { content: [{ type: "text", text: JSON.stringify(await servicesModule.healthService(config)) }] };
+	if (name === "sources_list") {
+		if (Object.keys(args).length) throw new Error("invalid params");
+		const pages = await localBrainRepository().listPages(true);
+		const sources = new Map<string, { id: string; documents: number; stale: number }>();
+		for (const page of pages) if (page.source) {
+			const value = sources.get(page.source.type) ?? { id: page.source.type, documents: 0, stale: 0 };
+			value.documents += 1;
+			if (page.stale) value.stale += 1;
+			sources.set(page.source.type, value);
+		}
+		return { content: [{ type: "text", text: JSON.stringify({ sources: [...sources.values()].sort((left, right) => left.id.localeCompare(right.id)) }) }] };
+	}
+	if (name === "status") return { content: [{ type: "text", text: JSON.stringify(await servicesModule.statusService(config as Config)) }] };
+	if (name === "health") return { content: [{ type: "text", text: JSON.stringify(await servicesModule.healthService(config as Config)) }] };
 	throw new Error("invalid params");
 }
 
@@ -231,7 +245,8 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 				if (options.requireSession && sessionId && requestId && sessions.wasCancelled(sessionId, requestId)) return response(rpc.id, undefined, { code: -32800, message: "request cancelled" });
 				const output = response(rpc.id, result);
 				if (options.requireSession && rpc.method === "initialize") {
-					const id = sessions.create(MCP_PROTOCOL_VERSION);
+					const protocolVersion = isRecord(result) && typeof result.protocolVersion === "string" ? result.protocolVersion : MCP_PROTOCOL_VERSION;
+					const id = sessions.create(protocolVersion);
 					const headers = new Headers(output.headers);
 					headers.set("mcp-session-id", id);
 					return new Response(output.body, { status: output.status, headers });
@@ -240,8 +255,7 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 			}
 			catch (error) {
 				if (options.requireSession && sessionId && rpc.id !== undefined && rpc.id !== null && sessions.wasCancelled(sessionId, String(rpc.id))) return response(rpc.id, undefined, { code: -32800, message: "request cancelled" });
-				const message = error instanceof Error ? error.message : "internal error";
-				return response(rpc.id, undefined, { code: message === "invalid params" ? -32602 : -32603, message: message === "invalid params" ? message : "internal error" });
+				return response(rpc.id, undefined, errorsModule.mcpErrorDetails(error));
 			}
 			finally {
 				if (options.requireSession && sessionId && requestId && startedRequest) sessions.finishRequest(sessionId, requestId);

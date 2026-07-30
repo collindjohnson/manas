@@ -1,4 +1,4 @@
-const conformanceModule = await import([".", "conformance"].join(String.fromCharCode(47)));
+import * as conformanceModule from "./conformance";
 
 import type { NormalizedDocument, SourceCheckpoint, SourceDescriptor } from "./types";
 

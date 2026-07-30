@@ -20,6 +20,34 @@ import {
 import { serveMcp } from "./mcp/server";
 import type { Provider, SearchMode } from "./model";
 
+
+
+import { BrainRepository } from "./brain/repository";
+import { migrateLegacyArchive } from "./migration";
+import { openPgliteBrainStore } from "./brain/store";
+import { indexBrainRepository, relatedBrainPages, rerankProjectedSearchResults, resolveBrainCitation, searchBrainRepository, searchExpandedBrainRepository, searchVerifiedHybridBrainRepository, traverseBrainGraph } from "./brain/pglite-indexer";
+import { FilesystemSourceAdapter } from "./sources/filesystem";
+import { syncSource } from "./sources/sync";
+import * as genericImportModule from "./sources/generic-imports";
+import { captureBrainNote } from "./brain/capture";
+import { OpenAiCompatibleEmbeddingProvider, OpenAiCompatibleRerankerProvider, OpenAiCompatibleStructuredExtractionProvider, OpenAiCompatibleTranscriptionProvider } from "./brain/providers";
+import { indexLocalEmbeddings } from "./brain/local-embeddings";
+import { loadState, saveState } from "./state";
+import * as operationRegistryModule from "./brain/operation-registry";
+import * as operationCatalogModule from "./brain/operation-catalog";
+import * as controlPlaneModule from "./brain/control-plane";
+import { serveMcpHttp } from "./mcp/http";
+import { callMcpHttp } from "./mcp/client";
+import { extractLocalFile } from "./sources/extractors";
+import { diagnoseBrain } from "./brain/diagnostics";
+import { authorizePersonalAccessToken, createPersonalAccessToken, identifyPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } from "./brain/access-tokens";
+import { listAuditEvents } from "./brain/audit";
+import { redactAdminEvent } from "./brain/control-plane";
+import { cancelJob, createJobSchedule, enqueueJob, listJobSchedules, listJobs, runOneJob } from "./brain/jobs";
+import { createParityJobHandlers } from "./brain/job-handlers";
+import { detectSchemaPack } from "./brain/schema";
+import { SqlTenantDirectory } from "./brain/tenancy";
+
 const LOCAL_PROVIDERS: Provider[] = [
 	"claude_code",
 	"codex",
@@ -28,31 +56,6 @@ const LOCAL_PROVIDERS: Provider[] = [
 	"grok",
 ];
 
-const { BrainRepository } = await import([".", "brain", "repository"].join(String.fromCharCode(47)));
-const { migrateLegacyArchive } = await import([".", "migration"].join(String.fromCharCode(47)));
-const { openPgliteBrainStore } = await import([".", "brain", "store"].join(String.fromCharCode(47)));
-const { indexBrainRepository, relatedBrainPages, rerankProjectedSearchResults, resolveBrainCitation, searchBrainRepository, searchExpandedBrainRepository, searchVerifiedHybridBrainRepository, traverseBrainGraph } = await import([".", "brain", "pglite-indexer"].join(String.fromCharCode(47)));
-const { FilesystemSourceAdapter } = await import([".", "sources", "filesystem"].join(String.fromCharCode(47)));
-const { syncSource } = await import([".", "sources", "sync"].join(String.fromCharCode(47)));
-const genericImportModule = await import([".", "sources", "generic-imports"].join(String.fromCharCode(47)));
-const { captureBrainNote } = await import([".", "brain", "capture"].join(String.fromCharCode(47)));
-const { OpenAiCompatibleEmbeddingProvider, OpenAiCompatibleRerankerProvider, OpenAiCompatibleStructuredExtractionProvider, OpenAiCompatibleTranscriptionProvider } = await import([".", "brain", "providers"].join(String.fromCharCode(47)));
-const { indexLocalEmbeddings } = await import([".", "brain", "local-embeddings"].join(String.fromCharCode(47)));
-const { loadState, saveState } = await import([".", "state"].join(String.fromCharCode(47)));
-const operationRegistryModule = await import([".", "brain", "operation-registry"].join(String.fromCharCode(47)));
-const operationCatalogModule = await import([".", "brain", "operation-catalog"].join(String.fromCharCode(47)));
-const controlPlaneModule = await import([".", "brain", "control-plane"].join(String.fromCharCode(47)));
-const { serveMcpHttp } = await import([".", "mcp", "http"].join(String.fromCharCode(47)));
-const { callMcpHttp } = await import([".", "mcp", "client"].join(String.fromCharCode(47)));
-const { extractLocalFile } = await import([".", "sources", "extractors"].join(String.fromCharCode(47)));
-const { diagnoseBrain } = await import([".", "brain", "diagnostics"].join(String.fromCharCode(47)));
-const { authorizePersonalAccessToken, createPersonalAccessToken, identifyPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } = await import([".", "brain", "access-tokens"].join(String.fromCharCode(47)));
-const { listAuditEvents } = await import([".", "brain", "audit"].join(String.fromCharCode(47)));
-const { redactAdminEvent } = await import([".", "brain", "control-plane"].join(String.fromCharCode(47)));
-const { cancelJob, createJobSchedule, enqueueJob, listJobSchedules, listJobs, runOneJob } = await import([".", "brain", "jobs"].join(String.fromCharCode(47)));
-const { createParityJobHandlers } = await import([".", "brain", "job-handlers"].join(String.fromCharCode(47)));
-const { detectSchemaPack } = await import([".", "brain", "schema"].join(String.fromCharCode(47)));
-const { SqlTenantDirectory } = await import([".", "brain", "tenancy"].join(String.fromCharCode(47)));
 
 const brainOperationModule = {
 	executeBrainRepositoryOperation: (repository: unknown, name: string, args: Record<string, unknown>) => operationRegistryModule.createBrainRepositoryOperationRegistry(repository as never).execute({ scope: "admin", principal: "cli" }, name, args),
