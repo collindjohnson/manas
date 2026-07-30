@@ -150,9 +150,11 @@ export async function runSync(
 	config: Config = defaultConfig(),
 	options: SyncOptions = {},
 ): Promise<SyncResult> {
-	return withStateLock(config.stateRoot, async () => {
-		await ensureArchiveRoot(config.archiveRoot);
-		const state = await loadState(config.stateRoot);
+	const execute = async (): Promise<SyncResult> => {
+		if (!options.dryRun) await ensureArchiveRoot(config.archiveRoot);
+		const state = options.dryRun
+			? { version: 1 as const, fingerprints: {} }
+			: await loadState(config.stateRoot);
 		const before = await scanArchive(config.archiveRoot);
 		const discovered = await discover(options);
 		const adapterConversations = discovered.results.flatMap(
@@ -263,5 +265,8 @@ export async function runSync(
 			});
 		}
 		return { report, changes, dryRun: Boolean(options.dryRun) };
-	});
+	};
+	return options.dryRun
+		? execute()
+		: withStateLock(config.stateRoot, execute);
 }
