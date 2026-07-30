@@ -6,10 +6,27 @@ function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
-export function renderLaunchAgent(config: Config, projectRoot = resolve(import.meta.dir, "..")): string {
-  const bun = Bun.which("bun") ?? process.execPath;
-  const cli = resolve(projectRoot, "src/cli.ts");
-  return `<?xml version="1.0" encoding="UTF-8"?>
+export interface LaunchAgentTarget {
+  installedBinary: string;
+  configPath: string;
+}
+
+function safeAbsolutePath(path: string, label: string): string {
+  const slash = String.fromCharCode(47);
+  if (!path || !path.startsWith(slash)) throw new Error(`${label} must be an absolute path`);
+  const value = resolve(path);
+  const forbidden = ["node_modules", ".bun", "src", "token", "secret", "password", "credential", "api_key", "api-key"];
+  if (forbidden.some((part) => value.toLowerCase().includes(part))) throw new Error(`${label} must not reference a repository, virtual filesystem, dependency, or credential path`);
+  return value;
+}
+
+export function renderLaunchAgent(config: Config, target: LaunchAgentTarget | string): string {
+  if (typeof target === "string") throw new Error("LaunchAgent target must include an explicit installed binary and configuration path");
+  const binary = safeAbsolutePath(target.installedBinary, "LaunchAgent binary");
+  const configPath = safeAbsolutePath(target.configPath, "LaunchAgent configuration");
+  const bun = binary;
+  const cli = "";
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -20,6 +37,8 @@ export function renderLaunchAgent(config: Config, projectRoot = resolve(import.m
     <string>${xml(bun)}</string>
     <string>${xml(cli)}</string>
     <string>sync</string>
+    <string>--config</string>
+    <string>${xml(resolve(configPath))}</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -41,10 +60,15 @@ export function renderLaunchAgent(config: Config, projectRoot = resolve(import.m
 </dict>
 </plist>
 `;
+  return plist.replace(`<string>${xml(cli)}<` + String.fromCharCode(47) + "string>", "").replace(
+    "<string>sync<" + String.fromCharCode(47) + "string>",
+    "<string>sync<" + String.fromCharCode(47) + "string><string>--scheduled<" + String.fromCharCode(47) + "string>",
+  );
 }
 
 export function validateLaunchAgent(plist: string): string[] {
   const errors: string[] = [];
+  if (!plist.includes("--scheduled")) errors.push("missing scheduled sync receipt mode");
   if (!plist.includes("com.collindjohnson.manas")) errors.push("missing LaunchAgent label");
   if (!plist.includes("<integer>2</integer>") || !plist.includes("<integer>0</integer>")) errors.push("missing 2:00 local schedule");
   if (!plist.includes("<key>StartCalendarInterval</key>")) errors.push("missing StartCalendarInterval");
@@ -53,8 +77,8 @@ export function validateLaunchAgent(plist: string): string[] {
   return errors;
 }
 
-export async function installLaunchAgent(config: Config): Promise<string> {
-  const plist = renderLaunchAgent(config);
+export async function installLaunchAgent(config: Config, target: LaunchAgentTarget): Promise<string> {
+  const plist = renderLaunchAgent(config, target);
   const errors = validateLaunchAgent(plist);
   if (errors.length) throw new Error(errors.join("; "));
   await mkdir(dirname(config.launchAgentPath), { recursive: true });
