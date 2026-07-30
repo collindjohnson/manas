@@ -52,7 +52,42 @@ describe("HTTP MCP", () => {
 		expect(isMcpNotification({ id: 1 })).toBe(false);
 		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", method: "notifications/initialized" })).toEqual({});
 		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_PROTOCOL_VERSION } })).toMatchObject({ protocolVersion: MCP_PROTOCOL_VERSION });
-		await expect(handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } })).rejects.toThrow("unsupported MCP protocol version");
+		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).toMatchObject({ protocolVersion: MCP_PROTOCOL_VERSION });
+		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).toMatchObject({ protocolVersion: MCP_PROTOCOL_VERSION });
+		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } })).toMatchObject({ protocolVersion: MCP_PROTOCOL_VERSION });
+		await expect(handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 20250618 } })).rejects.toThrow("invalid params");
+	});
+
+	test("keeps a negotiated legacy version in an HTTP session for subsequent requests", async () => {
+		const initialized = await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "codex", version: "0.145.0" } } }) as { protocolVersion: string };
+		const sessions = new McpSessionManager();
+		const sessionId = sessions.create(initialized.protocolVersion);
+		expect(() => sessions.require(sessionId, MCP_PROTOCOL_VERSION)).not.toThrow();
+		expect(await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })).toMatchObject({ tools: expect.any(Array) });
+	});
+
+	test("returns actionable JSON-RPC errors for repository reads without a brain binding", async () => {
+		const previous = process.env.MANAS_BRAIN_REPOSITORY;
+		delete process.env.MANAS_BRAIN_REPOSITORY;
+		try {
+			for (const name of ["brain_status", "get_schema", "list_schema_packs", "export_brain", "list_pages", "sources_list"]) {
+				await expect(handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } })).rejects.toThrow("MANAS_BRAIN_REPOSITORY");
+			}
+		} finally {
+			if (previous === undefined) delete process.env.MANAS_BRAIN_REPOSITORY;
+			else process.env.MANAS_BRAIN_REPOSITORY = previous;
+		}
+	});
+
+	test("reports a missing archive as degraded status without provisioning it", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-mcp-status-"));
+		const archiveRoot = join(root, "missing-archive");
+		try {
+			const result = await handleMcpHttpRequest({ archiveRoot, stateRoot: join(root, "state") }, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "status", arguments: {} } }) as { content: Array<{ text: string }> };
+			expect(JSON.parse(result.content[0]!.text)).toMatchObject({ archive: archiveRoot, documents: 0, folders: {}, stateFingerprints: 0, warnings: [`archive directory is unavailable: ${archiveRoot}`] });
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	test("advertises only operations supported by the HTTP transport", async () => {
@@ -101,6 +136,10 @@ describe("HTTP MCP", () => {
 			process.env.MANAS_BRAIN_REPOSITORY = repository.root;
 			const result = await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "put_page", arguments: { path: "notes/remote.md", content: "remote", expectedHead: null } } }) as { content: Array<{ text: string }> };
 			expect(JSON.parse(result.content[0]!.text)).toMatchObject({ path: "notes/remote.md", content: "remote" });
+			for (const name of ["brain_status", "get_schema", "list_schema_packs", "export_brain", "list_pages", "sources_list"]) {
+				const response = await handleMcpHttpRequest({}, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: {} } }) as { content: Array<{ text: string }> };
+				expect(JSON.parse(response.content[0]!.text)).toBeDefined();
+			}
 		} finally {
 			if (previous === undefined) delete process.env.MANAS_BRAIN_REPOSITORY;
 			else process.env.MANAS_BRAIN_REPOSITORY = previous;

@@ -1,9 +1,10 @@
+import * as conformanceModule from "./conformance";
+import * as auditModule from "../brain/audit";
 import { createHash, randomUUID } from "node:crypto";
 import type { NormalizedDocument, SourceAdapter, SourceCheckpoint } from "./types";
 
 const managedStart = "<!-- brain:managed:start -->";
 const managedEnd = "<!-- brain:managed:end -->";
-const conformanceModule = await import([".", "conformance"].join(String.fromCharCode(47)));
 
 type SourceRecord = { type: string; externalId: string; provenance?: NormalizedDocument["provenance"]; externalRevision?: string; contentHash?: string; extractionMetadata?: Record<string, string>; updatedAt?: string; visibilityLabels?: string[]; managedSections?: string[] };
 export interface SourceCheckpointStore {
@@ -53,7 +54,6 @@ export function createPgliteIngestionRunLifecycle(store: { query<T extends Recor
 
 export function createAuditQuarantineSink(store: { query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]> }, tenantId = "local"): SourceQuarantineSink {
 	return { record: async (event) => {
-		const auditModule = await import(["..", "brain", "audit"].join(String.fromCharCode(47)));
 		await auditModule.recordAuditEvent(store, { tenantId, action: "source.quarantined", subjectId: event.sourceId, metadata: { reason: event.reason, documentCount: event.documentCount, occurredAt: event.occurredAt } });
 	} };
 }

@@ -17,25 +17,31 @@
     "manas": "src/cli.ts"
   },
   "exports": {
-    ".": ".\u002fsrc\u002findex.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "test": "bun test",
+    "generate:version": "bun run scripts/generate-version.ts",
+    "check:release-version": "bun run scripts/verify-release-version.ts",
+    "check:runtime-assets": "bun run scripts/check-runtime-assets.ts",
+    "prebuild": "bun run generate:version && bun run check:runtime-assets",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "format:check": "bun run src/format-check.ts",
-    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "check:literal-imports": "bun run src/check-literal-imports.ts",
+    "build": "bun run check:literal-imports && bun build src/cli.ts --outdir dist --target bun",
+    "build:release": "bash scripts/release-build.sh",
     "runbooks:check": "bun run src/runbooks/validate.ts",
     "postgres:check": "bun run src/parity/postgres-check.ts",
     "postgres:docker": "bash scripts/postgres-contract.sh",
     "secrets:check": "bun run src/parity/secret-scan.ts",
     "parity:check": "bun run src/parity/verify.ts",
-		"parity:verify": "bun run src/parity/verify.ts --require-verified && bun run runbooks:check && bun run postgres:docker && bun run secrets:check && bun test && bun run typecheck && bun run format:check && bun run build && git diff --check",
+    "parity:verify": "bun run src/parity/verify.ts --require-verified && bun run runbooks:check && bun run postgres:docker && bun run secrets:check && bun test && bun run typecheck && bun run format:check && bun run build && git diff --check",
     "full-verification": "bun run parity:verify"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "latest"
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

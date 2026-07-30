@@ -1,3 +1,11 @@
+import { BrainRepository } from "../brain/repository";
+import { FilesystemSourceAdapter } from "../sources/filesystem";
+import { syncSource } from "../sources/sync";
+import { loadState, saveState } from "../state";
+import * as operationsModule from "../brain/operations";
+import * as operationRegistryModule from "../brain/operation-registry";
+import * as protocolModule from "./protocol";
+import * as errorsModule from "./errors";
 import { createInterface } from "node:readline";
 import type { Config } from "../config";
 import type { OperationRegistry } from "../brain/operation-registry";
@@ -11,12 +19,8 @@ import {
 } from "../brain/services";
 import type { SearchMode, SearchOptions } from "../model";
 
-const { BrainRepository } = await import(["..", "brain", "repository"].join(String.fromCharCode(47)));
-const { FilesystemSourceAdapter } = await import(["..", "sources", "filesystem"].join(String.fromCharCode(47)));
-const { syncSource } = await import(["..", "sources", "sync"].join(String.fromCharCode(47)));
-const { loadState, saveState } = await import(["..", "state"].join(String.fromCharCode(47)));
-const operationsModule = await import(["..", "brain", "operations"].join(String.fromCharCode(47)));
-const operationRegistryModule = await import(["..", "brain", "operation-registry"].join(String.fromCharCode(47)));
+
+import { MANAS_VERSION } from "@manas-version";
 
 const searchProperties = {
 	query: { type: "string" },
@@ -153,7 +157,6 @@ type Request = {
 	method: string;
 	params?: unknown;
 };
-const MCP_PROTOCOL_VERSION = "2024-11-05";
 function rpc(
 	id: Request["id"],
 	result?: unknown,
@@ -180,9 +183,7 @@ function validRequest(value: unknown): value is Request {
 	);
 }
 function requestedProtocolVersion(params: unknown): string {
-	if (!isRecord(params) || params.protocolVersion === undefined) return MCP_PROTOCOL_VERSION;
-	if (params.protocolVersion !== MCP_PROTOCOL_VERSION) throw new Error("invalid params");
-	return MCP_PROTOCOL_VERSION;
+	return protocolModule.negotiateMcpProtocolVersion(params);
 }
 function argumentsFor(request: Request): Record<string, unknown> {
 	if (
@@ -201,7 +202,7 @@ function only(args: Record<string, unknown>, allowed: string[]): void {
 
 function localBrainRepository() {
 	const root = process.env.MANAS_BRAIN_REPOSITORY;
-	if (!root) throw new Error("brain repository is not configured");
+	if (!root) throw errorsModule.mcpConfigurationUnavailableError();
 	return new BrainRepository(root);
 }
 
@@ -238,7 +239,7 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 					result = {
 						protocolVersion: requestedProtocolVersion(request.params),
 					capabilities: { tools: {} },
-					serverInfo: { name: "manas", version: "0.1.0" },
+					serverInfo: { name: "manas", version: MANAS_VERSION },
 				};
 			else if (request.method === "tools/list") result = { tools: advertisedTools(options.operationRegistry) };
 			else if (request.method === "tools/call") {
@@ -411,18 +412,7 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 			if (!notification)
 				console.log(
 					rpc(request.id, undefined, {
-						code:
-							signal.aborted
-								? -32800
-								: error instanceof Error && error.message === "invalid params"
-								? -32602
-								: -32603,
-						message:
-							signal.aborted
-								? "request cancelled"
-								: error instanceof Error && error.message === "invalid params"
-								? "invalid params"
-								: "internal error",
+						...errorsModule.mcpErrorDetails(error, signal.aborted),
 					}),
 				);
 		}

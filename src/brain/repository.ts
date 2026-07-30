@@ -1,3 +1,4 @@
+import * as schemaModule from "./schema";
 import { chmod, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -14,7 +15,6 @@ const schemaPacksDirectory = "schema-packs";
 const leaseName = "mutation.lock";
 const leaseDurationMs = 5 * 60 * 1000;
 const slash = String.fromCharCode(47);
-const schemaModule = await import([".", "schema"].join(slash));
 
 export const DEFAULT_BRAIN_DIRECTORIES = ["inbox", "notes", "people", "organizations", "meetings", "email", "conversations", "files"] as const;
 export const REPOSITORY_FAULT_POINTS = [

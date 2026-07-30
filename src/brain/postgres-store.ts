@@ -1,7 +1,7 @@
+import { BRAIN_STORE_MIGRATIONS } from "./store";
+import { runDatabaseMigrations } from "./migrations";
 import { Pool, type PoolClient } from "pg";
 
-const { BRAIN_STORE_MIGRATIONS } = await import([".", "store"].join(String.fromCharCode(47)));
-const { runDatabaseMigrations } = await import([".", "migrations"].join(String.fromCharCode(47)));
 
 export type SqlValue = string | number | boolean | null | Uint8Array;
 

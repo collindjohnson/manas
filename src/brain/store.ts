@@ -1,5 +1,10 @@
-import { PGlite } from "@electric-sql/pglite";
-import { vector } from "@electric-sql/pglite-pgvector";
+import { PGlite, type Extension, type PGliteOptions } from "@electric-sql/pglite";
+import pgliteDataPath from "@manas-pglite-assets/pglite.data" with { type: "file" };
+import pgliteWasmPath from "@manas-pglite-assets/pglite.wasm" with { type: "file" };
+import initdbWasmPath from "@manas-pglite-assets/initdb.wasm" with { type: "file" };
+import vectorBundlePath from "@manas-pgvector-assets/vector.tar.gz" with { type: "file" };
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runDatabaseMigrations, sqlMigration, type DatabaseMigration } from "./migrations";
 
 export type SqlValue = string | number | boolean | null | Uint8Array;
@@ -9,6 +14,31 @@ export interface BrainStore {
 	exec(sql: string): Promise<void>;
 	transaction<T>(action: (store: BrainStore) => Promise<T>): Promise<T>;
 	close(): Promise<void>;
+}
+
+const vector: Extension = {
+	name: "vector",
+	async setup(_pg, emscriptenOpts) { return { emscriptenOpts, bundlePath: new URL(await materializeVectorBundle(), "file:") }; },
+};
+
+let pgliteAssets: Promise<Pick<PGliteOptions, "pgliteWasmModule" | "initdbWasmModule" | "fsBundle">> | undefined;
+let vectorBundle: Promise<string> | undefined;
+
+function materializeVectorBundle(): Promise<string> {
+	vectorBundle ??= (async () => {
+		const path = join(tmpdir(), `manas-pgvector-${process.pid}.tar.gz`);
+		await Bun.write(path, Bun.file(vectorBundlePath));
+		return path;
+	})();
+	return vectorBundle;
+}
+
+async function pgliteOptions(): Promise<Pick<PGliteOptions, "pgliteWasmModule" | "initdbWasmModule" | "fsBundle" | "extensions">> {
+	pgliteAssets ??= Promise.all([
+		Bun.file(pgliteWasmPath).arrayBuffer().then((bytes) => WebAssembly.compile(bytes)),
+		Bun.file(initdbWasmPath).arrayBuffer().then((bytes) => WebAssembly.compile(bytes)),
+	]).then(([pgliteWasmModule, initdbWasmModule]) => ({ pgliteWasmModule, initdbWasmModule, fsBundle: Bun.file(pgliteDataPath) }));
+	return { extensions: { vector }, ...await pgliteAssets };
 }
 
 export class SerializedBrainStore implements BrainStore {
@@ -725,9 +755,10 @@ class PGliteBrainStore implements BrainStore {
 }
 
 export async function openPgliteBrainStore(dataDirectory?: string): Promise<BrainStore> {
+	const options = await pgliteOptions();
 	const database = dataDirectory
-		? new PGlite(dataDirectory, { extensions: { vector } })
-		: new PGlite({ extensions: { vector } });
+		? new PGlite(dataDirectory, options)
+		: new PGlite(options);
 	await database.waitReady;
 	await database.exec("CREATE EXTENSION IF NOT EXISTS vector");
 	const store = new SerializedBrainStore(new PGliteBrainStore(database));

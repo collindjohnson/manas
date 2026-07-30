@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MANAS_VERSION } from "@manas-version";
 import { spawn } from "node:child_process";
 import { advertisedTools } from "../src/mcp/server";
 import { createFullOperationRegistry } from "../src/brain/operation-catalog";
@@ -28,13 +29,39 @@ describe("stdio MCP shared catalog", () => {
 				if (code !== 0) { reject(new Error(`stdio MCP exited with ${code}: ${stderr}`)); return; }
 				try { resolve(stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)); } catch (error) { reject(error); }
 			});
-			child.stdin.end(["not-json", { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } }, { jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, { jsonrpc: "2.0", id: 3, method: "unknown/method" }].map((request) => typeof request === "string" ? request : JSON.stringify(request)).join("\n").concat("\n"));
+			child.stdin.end(["not-json", { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "codex", version: "0.145.0" } } }, { jsonrpc: "2.0", method: "notifications/initialized" }, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, { jsonrpc: "2.0", id: 3, method: "unknown/method" }].map((request) => typeof request === "string" ? request : JSON.stringify(request)).join("\n").concat("\n"));
 		});
 		expect(responses).toHaveLength(4);
 		expect(responses[0]).toMatchObject({ id: null, error: { code: -32700 } });
-		expect(responses[1]).toMatchObject({ id: 1, result: { protocolVersion: "2024-11-05" } });
+		expect(responses[1]).toMatchObject({ id: 1, result: { protocolVersion: "2024-11-05", serverInfo: { name: "manas", version: MANAS_VERSION } } });
 		expect(responses[2]).toMatchObject({ id: 2, result: { tools: expect.any(Array) } });
 		expect(responses[3]).toMatchObject({ id: 3, error: { code: -32601 } });
+	});
+
+	test("returns an actionable configuration error for repository reads without a brain binding", async () => {
+		const { MANAS_BRAIN_REPOSITORY: _repository, ...environment } = process.env;
+		const tools = ["brain_status", "get_schema", "list_schema_packs", "export_brain", "list_pages", "sources_list"];
+		const responses = await new Promise<Array<Record<string, unknown>>>((resolve, reject) => {
+			const child = spawn(process.execPath, ["src/cli.ts", "serve"], { cwd: process.cwd(), env: environment });
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+			child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+			child.once("error", reject);
+			child.once("close", (code) => {
+				if (code !== 0) { reject(new Error(`stdio MCP exited with ${code}: ${stderr}`)); return; }
+				try { resolve(stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)); } catch (error) { reject(error); }
+			});
+			child.stdin.end(tools.map((name, index) => JSON.stringify({ jsonrpc: "2.0", id: index + 1, method: "tools/call", params: { name, arguments: {} } })).join("\n").concat("\n"));
+		});
+		for (const [index] of tools.entries()) {
+			const response = responses.find((candidate) => candidate.id === index + 1);
+			const error = response?.error as { code: number; message: string };
+			expect(response?.id).toBe(index + 1);
+			expect(error.code).toBe(-32000);
+			expect(error.message).toContain("MANAS_BRAIN_REPOSITORY");
+			expect(error.message).toContain("initialized Manas brain repository");
+		}
 	});
 
 	test("cancels an in-flight stdio operation with the JSON-RPC cancellation code", async () => {

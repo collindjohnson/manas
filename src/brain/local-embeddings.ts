@@ -1,3 +1,4 @@
+import * as coverageModule from "./analytics";
 import { createHash } from "node:crypto";
 
 type Store = {
@@ -42,7 +43,6 @@ export async function indexLocalEmbeddings(store: Store, provider: Provider, bat
 	const dimension = provider.model.dimensions;
 	const model = modelIdentity.replaceAll("'", "''");
 	await store.exec(`CREATE INDEX IF NOT EXISTS ${indexName(modelIdentity, dimension)} ON brain_chunk_embeddings USING hnsw ((embedding::vector(${dimension})) vector_cosine_ops) WHERE model_fingerprint = '${model}'`);
-	const coverageModule = await import([".", "analytics"].join(String.fromCharCode(47)));
 	await coverageModule.refreshEmbeddingCoverage(store, { ...scope, modelFingerprint: modelIdentity });
 	return { embedded, model: modelIdentity, dimensions: dimension };
 }

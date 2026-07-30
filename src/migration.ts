@@ -1,4 +1,8 @@
-import { chmod, copyFile, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import * as verifyModule from "./report";
+import * as archiveModule from "./archive";
+import * as agentModule from "./launch-agent";
+import { access, chmod, copyFile, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -6,6 +10,35 @@ import { execFile as execFileCallback } from "node:child_process";
 
 const execFile = promisify(execFileCallback);
 const slash = String.fromCharCode(47);
+export async function preflightChatHistorySyncMigration(configPath: string): Promise<Record<string, unknown>> {
+	const home = homedir();
+	const archiveRoot = resolve(home, "Library", "Mobile Documents", "iCloud~md~obsidian", "Documents", "chat-history");
+	const legacyPath = resolve(home, "Library", "LaunchAgents", "com.virdis.chat-history-sync.plist");
+	const launchAgentPath = resolve(home, "Library", "LaunchAgents", "com.collindjohnson.manas.plist");
+	const stateRoot = resolve(home, ".local", "state", "manas");
+	try { await lstat(archiveRoot); } catch { throw new Error(`expected Obsidian chat-history vault is unavailable: ${archiveRoot}`); }
+	await access(archiveRoot, 2);
+	const verification = await verifyModule.verifyArchive(archiveRoot);
+	if (!verification.ok) throw new Error(`existing archive verification failed: ${verification.errors.join("; ")}`);
+	const target = resolve(configPath);
+	try { await lstat(target); throw new Error(`refusing to overwrite existing configuration: ${target}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	const config = { archiveRoot, stateRoot, launchAgentPath };
+	const plist = agentModule.renderLaunchAgent(config, target);
+	const errors = agentModule.validateLaunchAgent(plist);
+	if (errors.length) throw new Error(errors.join("; "));
+	await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+	await writeFile(target, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+	await chmod(target, 0o600);
+	await mkdir(dirname(launchAgentPath), { recursive: true });
+	await writeFile(launchAgentPath, plist, { mode: 0o644 });
+	const archive = await archiveModule.scanArchive(archiveRoot);
+	let legacyAgentText = "";
+	try { legacyAgentText = await readFile(legacyPath, "utf8"); } catch {}
+	const legacyStateCandidates = [resolve(home, ".local", "state", "chat-history-sync"), resolve(home, ".chat-history-sync")];
+	const legacyState: string[] = [];
+	for (const path of legacyStateCandidates) try { await lstat(path); legacyState.push(path); } catch {}
+	return { archiveRoot, stateRoot, configPath: target, launchAgentPath, archive: { documents: archive.documents.length, verification, reachable: true, writable: true }, legacyAgent: { path: legacyPath, exists: Boolean(legacyAgentText), referencesRemovedSource: legacyAgentText.includes("chat-history-sync") }, legacyState: { paths: legacyState, reused: false, reason: "Manas will scan sources and deduplicate against the verified archive" }, planned: { configWritten: true, plistWritten: true, activated: false, legacyAgentModified: false } };
+}
 
 type RepositoryLike = { root: string; initialize(): Promise<void> };
 

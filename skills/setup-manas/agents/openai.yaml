@@ -1,0 +1,4 @@
+interface:
+  display_name: "Set up Manas"
+  short_description: "Detect local AI chats and safely configure Manas sync"
+  default_prompt: "Use $setup-manas to detect local coding-agent chats, preview Manas setup, and ask me before syncing or enabling the scheduler."

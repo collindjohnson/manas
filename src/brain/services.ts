@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import * as sourceModule from "../sync";
+import { access, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { scanArchive } from "../archive";
 import type { Config } from "../config";
@@ -76,32 +77,59 @@ export async function statusService(config: Config) {
 	const folders = new Map<string, number>();
 	let documents = 0;
 	let truncated = false;
+	let archiveAvailable = false;
+	const warnings: string[] = [];
 	const maximumDocuments = 10_000;
-	for await (const path of new Bun.Glob("**").scan({
-		cwd: config.archiveRoot,
-		onlyFiles: true,
-	})) {
-		const parts = path.split(String.fromCharCode(47));
-		if (!path.endsWith(".md") || parts.some((part) => part.startsWith(".")))
-			continue;
-		const folder = parts.at(0) ?? ".";
-		folders.set(folder, (folders.get(folder) ?? 0) + 1);
-		documents++;
-		if (documents >= maximumDocuments) {
-			truncated = true;
-			break;
+	try {
+		await access(config.archiveRoot);
+		archiveAvailable = true;
+		for await (const path of new Bun.Glob("**").scan({
+			cwd: config.archiveRoot,
+			onlyFiles: true,
+		})) {
+			const parts = path.split(String.fromCharCode(47));
+			if (!path.endsWith(".md") || parts.some((part) => part.startsWith(".")))
+				continue;
+			const folder = parts.at(0) ?? ".";
+			folders.set(folder, (folders.get(folder) ?? 0) + 1);
+			documents++;
+			if (documents >= maximumDocuments) {
+				truncated = true;
+				break;
+			}
 		}
+	} catch {
+		warnings.push(`archive directory is unavailable: ${config.archiveRoot}`);
 	}
 	const state = await loadState(config.stateRoot);
+	const localSources = archiveAvailable ? await (sourceModule.discoverLocalSources as () => Promise<{ conversations: Array<{ updatedAt?: string }> }>)() : { conversations: [] };
+	let newestSourceTimestamp: string | undefined;
+	for (const conversation of localSources.conversations) if (conversation.updatedAt && (!newestSourceTimestamp || newestSourceTimestamp < conversation.updatedAt)) newestSourceTimestamp = conversation.updatedAt;
+	const newestArchive = async (): Promise<string | undefined> => {
+		let newest = 0;
+		for await (const path of new Bun.Glob("**").scan({ cwd: config.archiveRoot, onlyFiles: true })) if (path.endsWith(".md")) newest = Math.max(newest, (await stat(join(config.archiveRoot, path))).mtimeMs);
+		return newest ? new Date(newest).toISOString() : undefined;
+	};
+	const loaded = async (label: string): Promise<boolean> => {
+		const scope = ["gui", String(process.getuid?.() ?? 0), label].join(String.fromCharCode(47));
+		const run = Bun.spawn(["launchctl", "print", scope], { stdout: "ignore", stderr: "ignore" });
+		return await run.exited === 0;
+	};
 	return {
 		archive: config.archiveRoot,
+		configuredArchivePath: config.archiveRoot,
 		documents,
 		folders: Object.fromEntries(folders),
 		stateFingerprints: Object.keys(state.fingerprints).length,
+		lastSuccessfulSync: state.lastReport ? (await stat(join(config.stateRoot, "state.json")).then((value) => value.mtime.toISOString()).catch(() => undefined)) : undefined,
+		lastResult: state.lastReport ? { totals: state.lastReport.totals, failures: state.lastReport.failures } : undefined,
+		launchAgents: { manasLoaded: await loaded("com.collindjohnson.manas"), legacyLoaded: await loaded("com.virdis.chat-history-sync") },
+		newestArchivedChatTimestamp: archiveAvailable ? await newestArchive() : undefined,
+		newestSourceChatTimestamp: newestSourceTimestamp,
 		zeroEntropy: config.brain
 			? { collection: config.brain.zeroEntropyCollection, configured: true }
 			: undefined,
-		warnings: truncated ? ["archive metadata count reached its limit"] : [],
+		warnings: [...warnings, ...(truncated ? ["archive metadata count reached its limit"] : [])],
 	};
 }
 

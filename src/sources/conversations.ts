@@ -1,4 +1,4 @@
-const { transcriptBody } = await import(["..", "utils"].join(String.fromCharCode(47)));
+import { transcriptBody } from "../utils";
 import { createHash } from "node:crypto";
 import type { SourceCheckpoint, SourceDescriptor } from "./types";
 

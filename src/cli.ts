@@ -20,6 +20,41 @@ import {
 import { serveMcp } from "./mcp/server";
 import type { Provider, SearchMode } from "./model";
 
+import { MANAS_VERSION } from "@manas-version";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { installCompiledBinary } from "@manas/installer";
+import { isCompiledExecutable } from "@manas/executable";
+
+import { writeScheduledSyncReceipt } from "@manas/scheduler-receipt";
+
+import { BrainRepository } from "./brain/repository";
+import { migrateLegacyArchive, preflightChatHistorySyncMigration } from "./migration";
+import { openPgliteBrainStore } from "./brain/store";
+import { indexBrainRepository, relatedBrainPages, rerankProjectedSearchResults, resolveBrainCitation, searchBrainRepository, searchExpandedBrainRepository, searchVerifiedHybridBrainRepository, traverseBrainGraph } from "./brain/pglite-indexer";
+import { FilesystemSourceAdapter } from "./sources/filesystem";
+import { syncSource } from "./sources/sync";
+import * as genericImportModule from "./sources/generic-imports";
+import { captureBrainNote } from "./brain/capture";
+import { OpenAiCompatibleEmbeddingProvider, OpenAiCompatibleRerankerProvider, OpenAiCompatibleStructuredExtractionProvider, OpenAiCompatibleTranscriptionProvider } from "./brain/providers";
+import { indexLocalEmbeddings } from "./brain/local-embeddings";
+import { loadState, saveState } from "./state";
+import * as operationRegistryModule from "./brain/operation-registry";
+import * as operationCatalogModule from "./brain/operation-catalog";
+import * as controlPlaneModule from "./brain/control-plane";
+import { serveMcpHttp } from "./mcp/http";
+import { callMcpHttp } from "./mcp/client";
+import { extractLocalFile } from "./sources/extractors";
+import { diagnoseBrain } from "./brain/diagnostics";
+import { authorizePersonalAccessToken, createPersonalAccessToken, identifyPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } from "./brain/access-tokens";
+import { listAuditEvents } from "./brain/audit";
+import { redactAdminEvent } from "./brain/control-plane";
+import { cancelJob, createJobSchedule, enqueueJob, listJobSchedules, listJobs, runOneJob } from "./brain/jobs";
+import { createParityJobHandlers } from "./brain/job-handlers";
+import { detectSchemaPack } from "./brain/schema";
+import { SqlTenantDirectory } from "./brain/tenancy";
+import { setupManas, setupJsonDocument } from "./setup";
+
 const LOCAL_PROVIDERS: Provider[] = [
 	"claude_code",
 	"codex",
@@ -28,31 +63,6 @@ const LOCAL_PROVIDERS: Provider[] = [
 	"grok",
 ];
 
-const { BrainRepository } = await import([".", "brain", "repository"].join(String.fromCharCode(47)));
-const { migrateLegacyArchive } = await import([".", "migration"].join(String.fromCharCode(47)));
-const { openPgliteBrainStore } = await import([".", "brain", "store"].join(String.fromCharCode(47)));
-const { indexBrainRepository, relatedBrainPages, rerankProjectedSearchResults, resolveBrainCitation, searchBrainRepository, searchExpandedBrainRepository, searchVerifiedHybridBrainRepository, traverseBrainGraph } = await import([".", "brain", "pglite-indexer"].join(String.fromCharCode(47)));
-const { FilesystemSourceAdapter } = await import([".", "sources", "filesystem"].join(String.fromCharCode(47)));
-const { syncSource } = await import([".", "sources", "sync"].join(String.fromCharCode(47)));
-const genericImportModule = await import([".", "sources", "generic-imports"].join(String.fromCharCode(47)));
-const { captureBrainNote } = await import([".", "brain", "capture"].join(String.fromCharCode(47)));
-const { OpenAiCompatibleEmbeddingProvider, OpenAiCompatibleRerankerProvider, OpenAiCompatibleStructuredExtractionProvider, OpenAiCompatibleTranscriptionProvider } = await import([".", "brain", "providers"].join(String.fromCharCode(47)));
-const { indexLocalEmbeddings } = await import([".", "brain", "local-embeddings"].join(String.fromCharCode(47)));
-const { loadState, saveState } = await import([".", "state"].join(String.fromCharCode(47)));
-const operationRegistryModule = await import([".", "brain", "operation-registry"].join(String.fromCharCode(47)));
-const operationCatalogModule = await import([".", "brain", "operation-catalog"].join(String.fromCharCode(47)));
-const controlPlaneModule = await import([".", "brain", "control-plane"].join(String.fromCharCode(47)));
-const { serveMcpHttp } = await import([".", "mcp", "http"].join(String.fromCharCode(47)));
-const { callMcpHttp } = await import([".", "mcp", "client"].join(String.fromCharCode(47)));
-const { extractLocalFile } = await import([".", "sources", "extractors"].join(String.fromCharCode(47)));
-const { diagnoseBrain } = await import([".", "brain", "diagnostics"].join(String.fromCharCode(47)));
-const { authorizePersonalAccessToken, createPersonalAccessToken, identifyPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } = await import([".", "brain", "access-tokens"].join(String.fromCharCode(47)));
-const { listAuditEvents } = await import([".", "brain", "audit"].join(String.fromCharCode(47)));
-const { redactAdminEvent } = await import([".", "brain", "control-plane"].join(String.fromCharCode(47)));
-const { cancelJob, createJobSchedule, enqueueJob, listJobSchedules, listJobs, runOneJob } = await import([".", "brain", "jobs"].join(String.fromCharCode(47)));
-const { createParityJobHandlers } = await import([".", "brain", "job-handlers"].join(String.fromCharCode(47)));
-const { detectSchemaPack } = await import([".", "brain", "schema"].join(String.fromCharCode(47)));
-const { SqlTenantDirectory } = await import([".", "brain", "tenancy"].join(String.fromCharCode(47)));
 
 const brainOperationModule = {
 	executeBrainRepositoryOperation: (repository: unknown, name: string, args: Record<string, unknown>) => operationRegistryModule.createBrainRepositoryOperationRegistry(repository as never).execute({ scope: "admin", principal: "cli" }, name, args),
@@ -97,12 +107,8 @@ async function executeCatalogCommand(command: string, args: string[]): Promise<u
 		if (!token) throw new Error("both --mcp-url and --mcp-token (or MANAS_MCP_TOKEN) are required");
 		return callMcpHttp(remoteUrl, token, operation, input);
 	}
-	const repository = option(args, "--repo")
-		? brainRepository(args)
-		: operation.startsWith("jobs.")
-			? { head: async () => undefined, listPages: async () => [], getSettings: async () => ({ schemaPack: {} }) }
-			: brainRepository(args);
 	const storePath = option(args, "--store");
+	const repository = option(args, "--repo") ? brainRepository(args) : new BrainRepository(storePath ?? ".");
 	const store = storePath ? await openPgliteBrainStore(storePath) : undefined;
 	try {
 		const registry = operationCatalogModule.createFullOperationRegistry({ repository, ...(store ? { store, controlPlane: new controlPlaneModule.DurableControlPlane(store) } : {}) });
@@ -116,12 +122,15 @@ function usage(): string {
 	return `manas
 
 Commands:
-  sync [--provider <name>] [--dry-run]
+  setup [--archive <path>] [--config <path>] [--yes] [--no-schedule] [--detect-only|--preview|--repair] [--retire-legacy] [--json]
+  sync [--config <path>] [--provider <name>] [--dry-run|--scheduled]
   import chatgpt <zip-or-json>
   import claude <zip-or-json>
+  install
   verify
-  install-launch-agent
-  status
+  install-launch-agent --config <path>
+  status|sync-status [--config <path>]
+  migrate-chat-history-sync --config <path>
   index [--rebuild|--repair]
   search <query> [--limit <1-100>] [--keyword-only|--semantic-only]
   think <question>
@@ -162,6 +171,26 @@ function rejectUnknownFlags(args: string[], allowed: string[]): void {
 			throw new Error(`unknown option: ${value}`);
 }
 
+function rejectUnexpectedArguments(
+	args: string[],
+	valueOptions: string[],
+): void {
+	for (let index = 0; index < args.length; index += 1) {
+		const value = args[index];
+		if (valueOptions.includes(value)) {
+			index += 1;
+			continue;
+		}
+		if (!value.startsWith("--")) throw new Error(`unexpected argument: ${value}`);
+	}
+}
+
+function rejectDuplicateFlags(args: string[], flags: string[]): void {
+	for (const flag of flags)
+		if (args.filter((value) => value === flag).length > 1)
+			throw new Error(`duplicate option ${flag}`);
+}
+
 function requireNoArguments(command: string, args: string[]): void {
 	if (args.length) throw new Error(`${command} does not accept arguments`);
 }
@@ -188,15 +217,16 @@ function mcpScopes(): Array<"read" | "write" | "admin"> {
 	return [...new Set(values)] as Array<"read" | "write" | "admin">;
 }
 
-function hostedOperationAuthorizer(store: Parameters<typeof SqlTenantDirectory>[0]) {
+function hostedOperationAuthorizer(store: ConstructorParameters<typeof SqlTenantDirectory>[0]) {
 	const directory = new SqlTenantDirectory(store);
 	return async (principal: { id: string; tenantId: string; userId?: string }, definition: { requiredScope: "read" | "write" | "admin" }, input: Record<string, unknown>): Promise<void> => {
 		if (!principal.userId) return;
 		const brainId = typeof input.brainId === "string" ? input.brainId : undefined;
 		const labels = Array.isArray(input.labels) ? input.labels.filter((label): label is string => typeof label === "string") : [];
 		const authorization = await directory.authorizeWithLabels(principal.userId, principal.tenantId, brainId, definition.requiredScope);
-		if (authorization.allowedAccessLabels && labels.some((label) => !authorization.allowedAccessLabels.includes(label))) throw new Error("scope is not authorized");
-		return authorization;
+			const allowedAccessLabels = authorization.allowedAccessLabels;
+			if (allowedAccessLabels && labels.some((label) => !allowedAccessLabels.includes(label))) throw new Error("scope is not authorized");
+		return;
 	};
 }
 
@@ -206,9 +236,29 @@ function success(command: string, data: unknown): void {
 
 function failure(command: string | undefined, error: unknown): void {
 	const message = error instanceof Error ? error.message : "request failed";
+	if (command === "setup") {
+		const category = message.startsWith("unknown option") || message.startsWith("unexpected argument") || message.startsWith("missing value") || message.startsWith("duplicate option") || message.startsWith("choose either") || message.includes("require --yes")
+			? { exitCode: 2, code: "invalid_request" }
+			: message.includes("source") || message.includes("no supported local")
+				? { exitCode: 3, code: "source_detection_failed" }
+				: message.includes("archive") || message.includes("configuration")
+					? { exitCode: 4, code: "preflight_failed" }
+					: message.includes("preview") || message.includes("targets changed")
+						? { exitCode: 5, code: "plan_revalidation_failed" }
+						: message.includes("scheduler") || message.includes("LaunchAgent") || message.includes("scheduled sync")
+							? { exitCode: 6, code: "scheduler_activation_failed" }
+							: { exitCode: 7, code: "setup_failed" };
+		const partial = error as Error & { setupExitCode?: number; setupCode?: string; setupPartial?: Parameters<typeof setupJsonDocument>[0] };
+		const base = partial.setupPartial ? setupJsonDocument(partial.setupPartial) : { schema: "manas.setup.v1", version: MANAS_VERSION, mode: null, config: null, sources: null, preview: null, sync: null, scheduler: null, legacy: null };
+		const exitCode = partial.setupExitCode ?? category.exitCode;
+		console.log(JSON.stringify({ ...base, exitCode, error: { code: partial.setupCode ?? category.code, message } }));
+		process.exitCode = exitCode;
+		return;
+	}
 	const diagnosticMessage = process.env.MANAS_DIAGNOSTICS === "1" ? message.slice(0, 1_000) : undefined;
 	const safePrefixes = [
 		"unknown option",
+		"unexpected argument",
 		"missing value",
 		"duplicate option",
 		"unsupported local provider",
@@ -228,6 +278,23 @@ function failure(command: string | undefined, error: unknown): void {
 		"health does not accept",
 		"doctor does not accept",
 		"install-launch-agent does not accept",
+		"configuration file",
+		"expected Obsidian chat-history vault",
+		"existing archive verification failed",
+		"migrate-chat-history-sync requires",
+		"setup ",
+		"no supported local AI chat sources",
+		"source detection reported failures",
+		"selected archive verification failed",
+		"initial setup sync reported failures",
+		"automatic scheduling is currently supported",
+		"could not create the Manas configuration directory",
+		"could not secure the Manas configuration file",
+		"could not load the Manas LaunchAgent",
+		"could not reload the Manas LaunchAgent",
+		"self-install requires",
+		"scheduling requires",
+		"scheduled sync requires",
 	];
 	const safe = safePrefixes.some((prefix) => message.startsWith(prefix))
 		? message.slice(0, 300)
@@ -329,9 +396,52 @@ async function remoteBrainOperation(subcommand: string | undefined, args: string
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const command = args[0];
-	const config = await loadConfig();
+	if (command === "--version" || command === "version") {
+		console.log(MANAS_VERSION);
+		return;
+	}
+	const configPath = option(args, "--config");
+	const config = await loadConfig({ ...(configPath && command !== "migrate-chat-history-sync" && command !== "setup" ? { filePath: configPath } : {}) });
 	if (!command || command === "help" || command === "--help") {
 		success("help", { usage: usage() });
+		return;
+	}
+	if (command === "setup") {
+		rejectUnknownFlags(args.slice(1), [
+			"--archive",
+			"--config",
+			"--yes",
+			"--no-schedule",
+			"--detect-only",
+			"--preview",
+			"--allow-empty",
+			"--retire-legacy",
+			"--repair",
+			"--json",
+		]);
+		rejectUnexpectedArguments(args.slice(1), ["--archive", "--config"]);
+		rejectDuplicateFlags(args.slice(1), ["--yes", "--no-schedule", "--detect-only", "--preview", "--repair", "--allow-empty", "--retire-legacy", "--json"]);
+		if (args.includes("--detect-only") && args.includes("--preview"))
+			throw new Error("choose either --detect-only or --preview");
+		if (args.includes("--repair") && (args.includes("--detect-only") || args.includes("--preview") || args.includes("--no-schedule")))
+			throw new Error("repair cannot be combined with detect-only, preview, or no-schedule");
+		if (!args.includes("--detect-only") && !args.includes("--preview") && !args.includes("--yes"))
+			throw new Error("setup mutations require --yes when emitting JSON");
+		if (args.includes("--retire-legacy") && (args.includes("--detect-only") || args.includes("--preview") || !args.includes("--yes")))
+			throw new Error("legacy retirement requires --yes and cannot be combined with detect-only or preview");
+		const setup = { setupManas, setupJsonDocument };
+		const result = await setup.setupManas({
+			archiveRoot: option(args, "--archive"),
+			configPath,
+			yes: args.includes("--yes"),
+			noSchedule: args.includes("--no-schedule"),
+			detectOnly: args.includes("--detect-only"),
+			previewOnly: args.includes("--preview"),
+			allowEmpty: args.includes("--allow-empty"),
+			retireLegacy: args.includes("--retire-legacy"),
+			repair: args.includes("--repair"),
+		});
+		console.log(JSON.stringify(setup.setupJsonDocument(result)));
 		return;
 	}
 	const legacyJobsCommand = command === "jobs" && !CATALOG_COMMANDS.jobs?.[args[1] ?? ""];
@@ -616,18 +726,45 @@ async function main(): Promise<void> {
 		throw new Error("usage: brain init|migrate|verify|doctor|repair|history|revert|status|schema|access|index|embed|search|related|sources-list|sources-sync|import|extract|export|list|get|put|move|delete|restore|purge");
 	}
 	if (command === "sync") {
-		rejectUnknownFlags(args.slice(1), ["--provider", "--dry-run"]);
-		const result = await runSync(config, {
-			provider: providerOption(args),
-			dryRun: args.includes("--dry-run"),
-		});
-		success(command, {
-			dryRun: result.dryRun,
-			totals: result.report.totals,
-			changes: result.changes.length,
-		});
-		if (result.report.failures.length) process.exitCode = 1;
-		return;
+		rejectUnknownFlags(args.slice(1), ["--provider", "--dry-run", "--config", "--scheduled"]);
+		const scheduled = args.includes("--scheduled");
+		if (scheduled && !isCompiledExecutable(Bun.main))
+			throw new Error("scheduled sync requires an installed release binary");
+		const startedAt = new Date().toISOString();
+		const runId = crypto.randomUUID();
+		try {
+			const result = await runSync(config, {
+				provider: providerOption(args),
+				dryRun: args.includes("--dry-run"),
+			});
+			success(command, {
+				dryRun: result.dryRun,
+				totals: result.report.totals,
+				changes: result.changes.length,
+			});
+			if (scheduled) await writeScheduledSyncReceipt(config.stateRoot, {
+				runId,
+				executable: process.execPath,
+				configPath: configPath ?? "",
+				startedAt,
+				finishedAt: new Date().toISOString(),
+				status: result.report.failures.length ? "failed" : "success",
+				report: result.report,
+			});
+			if (result.report.failures.length) process.exitCode = 1;
+			return;
+		} catch (error) {
+			if (scheduled) await writeScheduledSyncReceipt(config.stateRoot, {
+				runId,
+				executable: process.execPath,
+				configPath: configPath ?? "",
+				startedAt,
+				finishedAt: new Date().toISOString(),
+				status: "failed",
+				report: { error: error instanceof Error ? error.message : "scheduled sync failed" },
+			});
+			throw error;
+		}
 	}
 	if (command === "import") {
 		const provider = args[1];
@@ -653,7 +790,7 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "verify") {
-		requireNoArguments(command, args.slice(1));
+		rejectUnknownFlags(args.slice(1), ["--config"]);
 		const result = await verifyArchive(config.archiveRoot);
 		const scan = await scanArchive(config.archiveRoot);
 		const local = await discoverLocalSources();
@@ -688,14 +825,36 @@ async function main(): Promise<void> {
 		if (!output.ok) process.exitCode = 1;
 		return;
 	}
-	if (command === "install-launch-agent") {
+	if (command === "install") {
 		requireNoArguments(command, args.slice(1));
-		const path = await installLaunchAgent(config);
+		if (!isCompiledExecutable(Bun.main))
+			throw new Error("self-install requires an installed release binary");
+		const result = await installCompiledBinary({
+			source: process.execPath,
+			destination: resolve(homedir(), ".local", "bin", "manas"),
+			version: MANAS_VERSION,
+		});
+		success(command, result);
+		return;
+	}
+	if (command === "install-launch-agent") {
+		rejectUnknownFlags(args.slice(1), ["--config"]);
+		if (!isCompiledExecutable(Bun.main))
+			throw new Error("scheduling requires an installed release binary; source execution supports --no-schedule only");
+		if (!configPath) throw new Error("install-launch-agent requires --config <path>");
+		const path = await installLaunchAgent(config, { installedBinary: process.execPath, configPath });
 		success(command, { installed: true, path });
 		return;
 	}
-	if (command === "status") {
-		requireNoArguments(command, args.slice(1));
+	if (command === "migrate-chat-history-sync") {
+		rejectUnknownFlags(args.slice(1), ["--config"]);
+		if (!configPath) throw new Error("migrate-chat-history-sync requires --config <path>");
+		const migration = { preflightChatHistorySyncMigration };
+		success(command, await migration.preflightChatHistorySyncMigration(configPath));
+		return;
+	}
+	if (command === "status" || command === "sync-status") {
+		rejectUnknownFlags(args.slice(1), ["--config"]);
 		success(command, await statusService(config));
 		return;
 	}
@@ -820,11 +979,12 @@ async function main(): Promise<void> {
 				const runtimeConfig = await loadConfig();
 				const configured = runtimeConfig.providers ?? {};
 				if (configured.embedding && configured.embedding.dimensions === undefined) throw new Error("configured embedding provider dimensions are required");
+					const embeddingDimensions = configured.embedding?.dimensions;
 				const parityHandlers = createParityJobHandlers({
 					store,
 					workerId,
 					tenantId,
-					...(configured.embedding ? { embeddingProvider: new OpenAiCompatibleEmbeddingProvider({ id: configured.embedding.model, dimensions: configured.embedding.dimensions }, configured.embedding.endpoint, configured.embedding.apiKey, configured.embedding.privacy) } : {}),
+					...(configured.embedding && embeddingDimensions !== undefined ? { embeddingProvider: new OpenAiCompatibleEmbeddingProvider({ id: configured.embedding.model, dimensions: embeddingDimensions }, configured.embedding.endpoint, configured.embedding.apiKey, configured.embedding.privacy) } : {}),
 					...(configured.transcription ? { transcriptionProvider: new OpenAiCompatibleTranscriptionProvider(configured.transcription.model, configured.transcription.endpoint, configured.transcription.apiKey, configured.transcription.privacy) } : {}),
 					...(configured.extraction ? { structuredExtractionProvider: new OpenAiCompatibleStructuredExtractionProvider(configured.extraction.model, configured.extraction.endpoint, configured.extraction.apiKey, configured.extraction.privacy) } : {}),
 				});
@@ -899,5 +1059,5 @@ try {
 	await main();
 } catch (error) {
 	if (process.argv[2] !== "serve") failure(process.argv[2], error);
-	process.exitCode = 1;
+	if (process.argv[2] !== "setup") process.exitCode = 1;
 }
