@@ -121,6 +121,6 @@ jobs:
             test -s "${directory}${separator}SHA256SUMS"
             (cd "$directory" && shasum -a 256 -c SHA256SUMS)
           done
-      - run: gh release create "${GITHUB_REF_NAME}" release/manas-darwin-arm64.zip release/manas-darwin-x64.zip release/SHA256SUMS --title "Manas ${GITHUB_REF_NAME}" --generate-notes
+      - run: gh release create "${GITHUB_REF_NAME}" release/manas-darwin-arm64.zip release/manas-darwin-x64.zip release/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --title "Manas ${GITHUB_REF_NAME}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
