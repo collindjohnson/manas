@@ -111,9 +111,14 @@ export async function statusService(config: Config) {
 		return newest ? new Date(newest).toISOString() : undefined;
 	};
 	const loaded = async (label: string): Promise<boolean> => {
+		if (process.platform !== "darwin") return false;
 		const scope = ["gui", String(process.getuid?.() ?? 0), label].join(String.fromCharCode(47));
-		const run = Bun.spawn(["launchctl", "print", scope], { stdout: "ignore", stderr: "ignore" });
-		return await run.exited === 0;
+		try {
+			const run = Bun.spawn(["launchctl", "print", scope], { stdout: "ignore", stderr: "ignore" });
+			return await run.exited === 0;
+		} catch {
+			return false;
+		}
 	};
 	return {
 		archive: config.archiveRoot,
