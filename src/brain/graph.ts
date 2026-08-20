@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 interface GraphDocument {
-	nessieId: string;
+	manasId: string;
 	provider: string;
 	project?: string | number | boolean | null;
 	repository?: string | number | boolean | null;
@@ -24,13 +24,13 @@ export function replaceDocumentGraph(
 ): void {
 	database
 		.prepare("DELETE FROM graph_edges WHERE document_id = ?")
-		.run(document.nessieId);
-	const source = nodeId("conversation", document.nessieId);
+		.run(document.manasId);
+	const source = nodeId("conversation", document.manasId);
 	database
 		.prepare(
 			"INSERT OR IGNORE INTO graph_nodes (id, type, value) VALUES (?, ?, ?)",
 		)
-		.run(source, "conversation", document.nessieId);
+		.run(source, "conversation", document.manasId);
 	const facts: Array<[string, string | undefined]> = [
 		["provider", document.provider],
 		["project", value(document.project)],
@@ -50,7 +50,7 @@ export function replaceDocumentGraph(
 			.prepare(
 				"INSERT OR REPLACE INTO graph_edges (source_id, target_id, type, document_id, weight, provenance) VALUES (?, ?, ?, ?, 1, 'frontmatter')",
 			)
-			.run(source, target, type, document.nessieId);
+			.run(source, target, type, document.manasId);
 	}
 }
 
@@ -112,22 +112,22 @@ export function graphContributions(
 
 export function relatedDocuments(
 	database: Database,
-	nessieId: string,
+	manasId: string,
 	limit = 20,
 ): Array<{
-	nessieId: string;
+	manasId: string;
 	path: string;
 	title?: string;
 	provider: string;
 	score: number;
 }> {
 	return database
-		.prepare(`SELECT d.nessie_id AS nessieId, d.relative_path AS path, d.title, d.provider, COUNT(*) AS score
+		.prepare(`SELECT d.manas_id AS manasId, d.relative_path AS path, d.title, d.provider, COUNT(*) AS score
 		FROM graph_edges source JOIN graph_edges peer ON source.target_id = peer.target_id AND peer.document_id <> source.document_id
-		JOIN documents d ON d.nessie_id = peer.document_id
-		WHERE source.document_id = ? GROUP BY d.nessie_id ORDER BY score DESC, d.indexed_at DESC LIMIT ?`)
-		.all(nessieId, limit) as Array<{
-		nessieId: string;
+		JOIN documents d ON d.manas_id = peer.document_id
+		WHERE source.document_id = ? GROUP BY d.manas_id ORDER BY score DESC, d.indexed_at DESC LIMIT ?`)
+		.all(manasId, limit) as Array<{
+		manasId: string;
 		path: string;
 		title?: string;
 		provider: string;

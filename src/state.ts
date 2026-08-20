@@ -60,15 +60,32 @@ async function withLock<T>(
 ): Promise<T> {
 	await ensureStateRoot(root);
 	const lockPath = join(root, `${name}.lock`);
-	let handle;
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
 	try {
-		handle = await open(lockPath, "wx", 0o600);
+		try {
+			handle = await open(lockPath, "wx", 0o600);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			const owner = Number.parseInt((await readFile(lockPath, "utf8").catch(() => "")).trim(), 10);
+			if (!Number.isInteger(owner) || owner <= 0)
+				throw new Error(`${name} already running: ${lockPath}`);
+			try {
+				process.kill(owner, 0);
+				throw new Error(`${name} already running: ${lockPath}`);
+			} catch (ownerError) {
+				if ((ownerError as NodeJS.ErrnoException).code !== "ESRCH") throw ownerError;
+			}
+			await rm(lockPath, { force: true });
+			try {
+				handle = await open(lockPath, "wx", 0o600);
+			} catch (retryError) {
+				if ((retryError as NodeJS.ErrnoException).code === "EEXIST")
+					throw new Error(`${name} already running: ${lockPath}`);
+				throw retryError;
+			}
+		}
 		await handle.write(`${process.pid}\n`);
 		return await action();
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EEXIST")
-			throw new Error(`${name} already running: ${lockPath}`);
-		throw error;
 	} finally {
 		await handle?.close();
 		if (handle) await rm(lockPath, { force: true });

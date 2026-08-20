@@ -24,7 +24,7 @@ import {
 export interface ArchiveScan {
 	documents: ArchiveDocument[];
 	bySource: Map<string, ArchiveDocument>;
-	byNessieId: Map<string, ArchiveDocument>;
+	byManasId: Map<string, ArchiveDocument>;
 	warnings: string[];
 }
 
@@ -116,7 +116,7 @@ function sourceKey(provider: unknown, sourceId: unknown): string | undefined {
 export async function scanArchive(root: string): Promise<ArchiveScan> {
 	const documents: ArchiveDocument[] = [];
 	const bySource = new Map<string, ArchiveDocument>();
-	const byNessieId = new Map<string, ArchiveDocument>();
+	const byManasId = new Map<string, ArchiveDocument>();
 	const warnings: string[] = [];
 	for (const path of await walkMarkdown(root)) {
 		const text = await readFile(path, "utf8");
@@ -126,17 +126,25 @@ export async function scanArchive(root: string): Promise<ArchiveScan> {
 			continue;
 		}
 		const values = parsed.values;
-		const nessieId =
+		const legacyId =
 			typeof values.nessie_id === "string" ? values.nessie_id : undefined;
-		if (!nessieId) {
-			warnings.push(`${path}: missing nessie_id`);
+		const canonicalId =
+			typeof values.manas_id === "string" ? values.manas_id : undefined;
+		if (legacyId && canonicalId && legacyId !== canonicalId) {
+			warnings.push(`${path}: conflicting manas_id and nessie_id`);
+			continue;
+		}
+		const manasId =
+			canonicalId ?? legacyId;
+		if (!manasId) {
+			warnings.push(`${path}: missing manas_id`);
 			continue;
 		}
 		const document: ArchiveDocument = {
 			path,
 			provider:
 				typeof values.provider === "string" ? values.provider : "unknown",
-			nessieId,
+			manasId,
 			sourceId:
 				typeof values.source_id === "string" ? values.source_id : undefined,
 			sourcePath:
@@ -155,9 +163,9 @@ export async function scanArchive(root: string): Promise<ArchiveScan> {
 			bodyHash: sha256(parsed.body),
 		};
 		documents.push(document);
-		if (byNessieId.has(nessieId))
-			warnings.push(`duplicate nessie_id: ${nessieId}`);
-		else byNessieId.set(nessieId, document);
+		if (byManasId.has(manasId))
+			warnings.push(`duplicate manas_id: ${manasId}`);
+		else byManasId.set(manasId, document);
 		const key = sourceKey(values.provider, values.source_id);
 		if (key) {
 			if (bySource.has(key))
@@ -167,7 +175,7 @@ export async function scanArchive(root: string): Promise<ArchiveScan> {
 			else bySource.set(key, document);
 		}
 	}
-	return { documents, bySource, byNessieId, warnings };
+	return { documents, bySource, byManasId, warnings };
 }
 
 function scalar(value: string | number | boolean | null | undefined): string {
@@ -193,7 +201,7 @@ export function renderNewDocument(conversation: Conversation): {
 	const relativePath = join(folder, fileName);
 	const header = [
 		"---",
-		field("nessie_id", id),
+		field("manas_id", id),
 		field("kind", `${conversation.provider}_chat`),
 		field("title", conversation.title),
 		field("owner", null),
@@ -292,7 +300,7 @@ export function planArchiveChanges(
 			continue;
 		}
 		const rendered = renderNewDocument(conversation);
-		const collision = scan.byNessieId.get(rendered.id);
+		const collision = scan.byManasId.get(rendered.id);
 		if (collision) {
 			changes.push({
 				kind: "skip",

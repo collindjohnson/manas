@@ -21,6 +21,7 @@ import { serveMcp } from "./mcp/server";
 import type { Provider, SearchMode } from "./model";
 
 import { MANAS_VERSION } from "@manas-version";
+import { migrateIdentifiers } from "@manas/identifier-migration";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { installCompiledBinary } from "@manas/installer";
@@ -131,11 +132,12 @@ Commands:
   install-launch-agent --config <path>
   status|sync-status [--config <path>]
   migrate-chat-history-sync --config <path>
+  migrate-identifiers [--preview|--yes] [--json]
   index [--rebuild|--repair]
   search <query> [--limit <1-100>] [--keyword-only|--semantic-only]
   think <question>
-  get <nessie-id>
-  related <nessie-id>
+  get <manas-id>
+  related <manas-id>
   health
   jobs list|enqueue-index|schedule-index|schedules|run-one|cancel --store <pglite-directory> [--repo <brain-repository>] [--id <job-id>] [--at <ISO-timestamp>] [--every-seconds <seconds>] [--limit <1-1000>]
   serve [--http-port <port>]
@@ -234,8 +236,21 @@ function success(command: string, data: unknown): void {
 	console.log(JSON.stringify({ ok: true, command, data }, null, 2));
 }
 
+function errorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (
+		typeof error === "object" &&
+		error !== null &&
+		"message" in error &&
+		typeof error.message === "string"
+	)
+		return error.message;
+	if (typeof error === "string") return error;
+	return "request failed";
+}
+
 function failure(command: string | undefined, error: unknown): void {
-	const message = error instanceof Error ? error.message : "request failed";
+	const message = errorMessage(error);
 	if (command === "setup") {
 		const category = message.startsWith("unknown option") || message.startsWith("unexpected argument") || message.startsWith("missing value") || message.startsWith("duplicate option") || message.startsWith("choose either") || message.includes("require --yes")
 			? { exitCode: 2, code: "invalid_request" }
@@ -295,6 +310,7 @@ function failure(command: string | undefined, error: unknown): void {
 		"self-install requires",
 		"scheduling requires",
 		"scheduled sync requires",
+		"brain schema ",
 	];
 	const safe = safePrefixes.some((prefix) => message.startsWith(prefix))
 		? message.slice(0, 300)
@@ -853,6 +869,13 @@ async function main(): Promise<void> {
 		success(command, await migration.preflightChatHistorySyncMigration(configPath));
 		return;
 	}
+	if (command === "migrate-identifiers") {
+		rejectUnknownFlags(args.slice(1), ["--preview", "--yes", "--json"]);
+		if (args.includes("--preview") && args.includes("--yes"))
+			throw new Error("choose either --preview or --yes");
+		success(command, await migrateIdentifiers(config, args.includes("--yes")));
+		return;
+	}
 	if (command === "status" || command === "sync-status") {
 		rejectUnknownFlags(args.slice(1), ["--config"]);
 		success(command, await statusService(config));
@@ -928,17 +951,17 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "get") {
-		const nessieId = args[1];
-		if (!nessieId) throw new Error("usage: get <nessie-id>");
-		if (args.length !== 2) throw new Error("usage: get <nessie-id>");
-		success(command, await getService(config, nessieId));
+		const manasId = args[1];
+		if (!manasId) throw new Error("usage: get <manas-id>");
+		if (args.length !== 2) throw new Error("usage: get <manas-id>");
+		success(command, await getService(config, manasId));
 		return;
 	}
 	if (command === "related") {
-		const nessieId = args[1];
-		if (!nessieId) throw new Error("usage: related <nessie-id>");
-		if (args.length !== 2) throw new Error("usage: related <nessie-id>");
-		success(command, await relatedService(config, nessieId));
+		const manasId = args[1];
+		if (!manasId) throw new Error("usage: related <manas-id>");
+		if (args.length !== 2) throw new Error("usage: related <manas-id>");
+		success(command, await relatedService(config, manasId));
 		return;
 	}
 	if (command === "health" || command === "doctor") {

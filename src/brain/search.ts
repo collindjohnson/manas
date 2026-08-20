@@ -7,6 +7,8 @@ import {
 	resolveZeroEntropyApiKey,
 } from "./zeroentropy";
 
+import { configuredArchiveEmbeddingProvider, searchArchiveEmbeddings } from "@manas-brain-archive-embeddings";
+
 export const RRF_K = 60;
 export const MAX_GRAPH_BOOST = 0.1;
 
@@ -15,7 +17,7 @@ export class SemanticUnavailableError extends Error {}
 type Row = {
 	chunk_id: string;
 	text: string;
-	nessie_id: string;
+	manas_id: string;
 	relative_path: string;
 	title?: string;
 	provider: string;
@@ -112,7 +114,7 @@ function lexicalRows(
 	values.push(limit);
 	return database
 		.prepare(
-			`SELECT c.id AS chunk_id, c.text, d.nessie_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.nessie_id = c.document_id WHERE ${clauses.join(" AND ")} ORDER BY rank, c.id LIMIT ?`,
+			`SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.manas_id = c.document_id WHERE ${clauses.join(" AND ")} ORDER BY rank, c.id LIMIT ?`,
 		)
 		.all(...values) as Row[];
 }
@@ -195,6 +197,7 @@ async function searchInternal(
 ): Promise<{ results: SearchResult[]; degradation?: string }> {
 	const brain = config.brain;
 	if (!brain) throw new Error("brain configuration is unavailable");
+	const localEmbeddingProvider = configuredArchiveEmbeddingProvider(config);
 	validateSearchOptions(options);
 	const mode = options.mode ?? "hybrid";
 	const limit = options.limit ?? brain.retrievalLimit;
@@ -207,8 +210,22 @@ async function searchInternal(
 						items: [] as Array<{ row: Row; score: number }>,
 						degradation: undefined as string | undefined,
 					})
-				: (async () => {
-						const key = await resolveZeroEntropyApiKey(
+			: (async () => {
+					if (localEmbeddingProvider) {
+						try {
+							const local = await searchArchiveEmbeddings(database, localEmbeddingProvider, query, candidateLimit, options);
+							return {
+								items: local.map((item) => ({ row: { ...item.row, rank: 0 }, score: item.score })),
+								degradation: undefined,
+							};
+						} catch (error) {
+							return {
+								items: [],
+								degradation: error instanceof Error ? error.message : "semantic search is unavailable",
+							};
+						}
+					}
+					const key = await resolveZeroEntropyApiKey(
 							brain.keychainService,
 							brain.keychainAccount,
 						);
@@ -228,7 +245,7 @@ async function searchInternal(
 								retryBackoffMs: brain.retryBackoffMs,
 							}).search(query, candidateLimit, metadataFilter(options));
 							const get = database.prepare(
-								"SELECT c.id AS chunk_id, c.text, d.nessie_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, 0 AS rank FROM chunks c JOIN documents d ON d.nessie_id = c.document_id WHERE c.id = ?",
+								"SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, 0 AS rank FROM chunks c JOIN documents d ON d.manas_id = c.document_id WHERE c.id = ?",
 							);
 							return {
 								items: remote.flatMap((item) => {
@@ -285,13 +302,13 @@ async function searchInternal(
 		// Graph relationships are a post-retrieval signal: they cannot introduce a
 		// document that lexical/semantic retrieval did not independently return.
 		const contributions = graphContributions(database, [
-			...new Set(rows.map((item) => item.row.nessie_id)),
+			...new Set(rows.map((item) => item.row.manas_id)),
 		]);
 		const scored = rows.map((item) => {
 			const unboosted =
 				(item.lexicalRank ? 1 / (RRF_K + item.lexicalRank) : 0) +
 				(item.semanticRank ? 1 / (RRF_K + item.semanticRank) : 0);
-			const facts = contributions.get(item.row.nessie_id) ?? [];
+			const facts = contributions.get(item.row.manas_id) ?? [];
 			// Each explicit shared fact contributes a small fixed amount. The cap
 			// prevents a densely connected conversation from dominating retrieval.
 			const graphBoost = Math.min(MAX_GRAPH_BOOST, facts.length * 0.025);
@@ -315,17 +332,17 @@ async function searchInternal(
 							(b.item.lexicalRank ?? Number.POSITIVE_INFINITY) ||
 						(a.item.semanticRank ?? Number.POSITIVE_INFINITY) -
 							(b.item.semanticRank ?? Number.POSITIVE_INFINITY) ||
-						a.item.row.nessie_id.localeCompare(b.item.row.nessie_id) ||
+						a.item.row.manas_id.localeCompare(b.item.row.manas_id) ||
 						a.item.row.chunk_id.localeCompare(b.item.row.chunk_id),
 				)
 				.filter(
 					({ item }) =>
-						!seen.has(item.row.nessie_id) &&
-						Boolean(seen.add(item.row.nessie_id)),
+						!seen.has(item.row.manas_id) &&
+						Boolean(seen.add(item.row.manas_id)),
 				)
 				.slice(0, limit)
 				.map(({ item, unboosted, graphBoost, facts, final }) => ({
-					nessieId: item.row.nessie_id,
+					manasId: item.row.manas_id,
 					path: item.row.relative_path,
 					title: item.row.title,
 					provider: item.row.provider,

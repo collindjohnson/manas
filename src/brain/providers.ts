@@ -89,7 +89,6 @@ async function providerRequest(
 		]);
 	} finally {
 		if (timer) clearTimeout(timer);
-		controller.abort();
 	}
 }
 

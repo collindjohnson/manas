@@ -17,7 +17,7 @@ describe("archive transactions", () => {
     await mkdir(join(root, "claude"), { recursive: true });
     await Bun.write(existingPath, [
       "---",
-      'nessie_id: "KEEP"',
+      'manas_id: "KEEP"',
       'provider: "claude_code"',
       'source_id: "source-1"',
       'title: "Original title"',
@@ -34,11 +34,14 @@ describe("archive transactions", () => {
     expect(changes.map((change) => change.kind)).toEqual(["update", "create"]);
     expect(changes[0]?.relativePath).toBe("claude/Existing title--KEEP.md");
     await applyArchiveChanges(root, changes, false);
-    expect(await readFile(existingPath, "utf8")).toContain('nessie_id: "KEEP"');
-    expect(await readFile(existingPath, "utf8")).toContain("user: new");
+		expect(await readFile(existingPath, "utf8")).toContain('manas_id: "KEEP"');
+		expect(await readFile(existingPath, "utf8")).toContain("user: new");
+		expect(
+			await readFile(join(root, changes[1]!.relativePath!), "utf8"),
+		).toContain("manas_id:");
     const after = await scanArchive(root);
     expect(after.documents).toHaveLength(2);
-    expect([...after.byNessieId.keys()]).toContain(renderNewDocument(created!).id);
+		expect([...after.byManasId.keys()]).toContain(renderNewDocument(created!).id);
   });
 
   test("rolls back staged placement when one change fails path validation", async () => {

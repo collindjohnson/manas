@@ -52,7 +52,7 @@ export interface AdapterResult {
 export interface ArchiveDocument {
 	path: string;
 	provider: Provider | string;
-	nessieId: string;
+	manasId: string;
 	sourceId?: string;
 	sourcePath?: string;
 	title?: string;
@@ -84,7 +84,7 @@ export type EmbeddingInputType = "document" | "query";
 export type SearchMode = "hybrid" | "keyword" | "semantic";
 
 export interface BrainDocument {
-	nessieId: string;
+	manasId: string;
 	relativePath: string;
 	provider: string;
 	kind?: string;
@@ -158,7 +158,7 @@ export interface SearchOutcome {
 }
 
 export interface SearchResult {
-	nessieId: string;
+	manasId: string;
 	path: string;
 	title?: string;
 	provider: string;

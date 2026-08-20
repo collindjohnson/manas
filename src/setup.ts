@@ -175,6 +175,7 @@ async function defaultDependencies(): Promise<SetupDependencies> {
 				executable: process.execPath,
 				configPath,
 				startedAt,
+				timeoutMs: 120_000,
 			}, {
 				run: async (command) => Bun.spawn(command).exited,
 				waitForReceipt: (after, timeoutMs) => waitForScheduledSyncReceipt(config.stateRoot, after, timeoutMs),
@@ -340,6 +341,7 @@ export async function setupManas(
 	const requested = availability.requested;
 	const schedulingSupported = availability.supported;
 	const scheduleRequested = requested && schedulingSupported;
+	const schedulerUnavailable = requested && !schedulingSupported;
 	if (options.previewOnly)
 		return {
 			mode: "preview",
@@ -351,7 +353,7 @@ export async function setupManas(
 				totals: preview.report.totals,
 				changes: preview.changes.length,
 			},
-			scheduler: schedulingSupported ? { requested, installed: false } : { requested, installed: false, status: "unsupported", warning: availability.warning },
+			scheduler: schedulerUnavailable ? { requested, installed: false, status: "unsupported", warning: availability.warning } : { requested, installed: false },
 		};
 	if (scheduleRequested) assertSchedulingRuntime(true, actions.runtime?.entrypoint ?? Bun.main);
 	const message = `Sync ${preview.report.totals.created} new and ${preview.report.totals.updated} updated chats to ${archiveRoot}${scheduleRequested ? " and enable daily sync" : ""}?`;
@@ -366,7 +368,7 @@ export async function setupManas(
 				totals: preview.report.totals,
 				changes: preview.changes.length,
 			},
-			scheduler: schedulingSupported ? { requested, installed: false } : { requested, installed: false, status: "unsupported", warning: availability.warning },
+			scheduler: schedulerUnavailable ? { requested, installed: false, status: "unsupported", warning: availability.warning } : { requested, installed: false },
 		};
 	const verifiedDiscovery = await actions.discover();
 	if (discoveryFingerprint(verifiedDiscovery) !== plannedTargets)
@@ -433,7 +435,7 @@ export async function setupManas(
 			requested,
 			installed: Boolean(installedPath),
 			...(installedPath ? { path: installedPath } : {}),
-			...(!schedulingSupported ? { status: "unsupported" as const, warning: availability.warning } : installedPath ? { status: "active" as const } : {}),
+			...(schedulerUnavailable ? { status: "unsupported" as const, warning: availability.warning } : installedPath ? { status: "active" as const } : {}),
 		},
 		...(legacy ? { legacy } : {}),
 	};

@@ -23,6 +23,20 @@ export interface SessionMeta {
   workspacePath?: string;
 }
 
+const repositoryMetadataCache = new Map<string, Pick<SessionMeta, "repository" | "repositoryUrl">>();
+
+function boundedGit(repository: string, args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", repository, ...args], {
+      encoding: "utf8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function recordText(value: unknown): string {
   return extractText(value);
 }
@@ -48,17 +62,13 @@ export function sortMessages(messages: TranscriptMessage[]): TranscriptMessage[]
 export function metadataFromCwd(cwd: unknown): SessionMeta {
   const metadata = projectFromPath(typeof cwd === "string" ? cwd : undefined);
   if (!metadata.repository) return metadata;
-  const remote = Bun.spawnSync(["git", "-C", metadata.repository, "config", "--get", "remote.origin.url"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  const repositoryUrl = remote.exitCode === 0 ? new TextDecoder().decode(remote.stdout).trim() : undefined;
-  const root = Bun.spawnSync(["git", "-C", metadata.repository, "rev-parse", "--show-toplevel"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  const repository = root.exitCode === 0 ? new TextDecoder().decode(root.stdout).trim() : metadata.repository;
-  return { ...metadata, repository, repositoryUrl };
+  const cached = repositoryMetadataCache.get(metadata.repository);
+  if (cached) return { ...metadata, ...cached };
+  const repositoryUrl = boundedGit(metadata.repository, ["config", "--get", "remote.origin.url"]);
+  const repository = boundedGit(metadata.repository, ["rev-parse", "--show-toplevel"]) ?? metadata.repository;
+  const resolved = { repository, ...(repositoryUrl ? { repositoryUrl } : {}) };
+  repositoryMetadataCache.set(metadata.repository, resolved);
+  return { ...metadata, ...resolved };
 }
 
 export function buildConversation(
@@ -104,3 +114,4 @@ export function mergeMeta(...values: SessionMeta[]): SessionMeta {
   }
   return result;
 }
+import { execFileSync } from "node:child_process";

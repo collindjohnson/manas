@@ -13,6 +13,24 @@ describe("OpenAI-compatible embedding provider", () => {
 		} finally { globalThis.fetch = original; }
 	});
 
+	test("keeps streaming provider response bodies readable after headers arrive", async () => {
+		const encoder = new TextEncoder();
+		const fetcher = (async (_input, init) => new Response(new ReadableStream<Uint8Array>({
+			start(controller) {
+				const timer = setTimeout(() => {
+					controller.enqueue(encoder.encode(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] })));
+					controller.close();
+				}, 10);
+				init?.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					controller.error(new DOMException("The operation was aborted.", "AbortError"));
+				}, { once: true });
+			},
+		}), { headers: { "content-type": "application/json" } })) as typeof fetch;
+		const provider = new OpenAiCompatibleEmbeddingProvider({ id: "streaming", dimensions: 2 }, "http://127.0.0.1/embeddings", undefined, "local", { fetcher });
+		expect(await provider.embed(["hello"])).toEqual([[0.1, 0.2]]);
+	});
+
 	test("rejects remote endpoints unless hosted mode is explicit", () => {
 		expect(() => new OpenAiCompatibleEmbeddingProvider({ id: "local", dimensions: 2 }, "https://example.invalid/embeddings")).toThrow("explicitly configure hosted mode");
 		expect(() => new OpenAiCompatibleEmbeddingProvider({ id: "local", dimensions: 2 }, "file:///tmp/embeddings")).toThrow("endpoint protocol");
