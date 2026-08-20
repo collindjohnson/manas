@@ -325,7 +325,12 @@ function rejectUnknownKeys(value: unknown, allowed: readonly string[], field: st
 function assertConfigShape(value: unknown, field = "configuration"): void {
 	if (value === undefined) return;
 	if (!isRecord(value)) throw new Error(`${field} must contain an object`);
-	rejectUnknownKeys(value, ["archiveRoot", "stateRoot", "launchAgentPath", "brain", "providers", "auth"], field);
+	rejectUnknownKeys(value, ["configVersion", "archiveRoot", "stateRoot", "launchAgentPath", "brain", "providers", "auth"], field);
+	if (
+		"configVersion" in value &&
+		(value.configVersion !== 1 || !Number.isInteger(value.configVersion))
+	)
+		throw new Error(`unsupported configuration version: ${String(value.configVersion)}`);
 	const brain = value.brain;
 	if (brain !== undefined && !isRecord(brain)) throw new Error(`${field}.brain must contain an object`);
 	if (brain !== undefined) rejectUnknownKeys(brain, ["databasePath", "zeroEntropyBaseUrl", "zeroEntropyCollection", "zeroEntropyBatchSize", "chunkTargetChars", "chunkMaxChars", "retrievalLimit", "synthesisEvidenceLimit", "requestTimeoutMs", "retryAttempts", "retryBackoffMs", "remoteOversample", "remotePollIntervalMs", "remotePollDurationMs", "snippetChars", "questionMaxChars", "synthesisEvidenceChars", "diagnostics", "codexTimeoutMs", "synthesisCommand", "rerankerEndpoint", "rerankerModel", "generationEndpoint", "generationModel", "keychainService", "keychainAccount"], `${field}.brain`);
@@ -422,7 +427,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Confi
 		}
 		if (!isRecord(parsed)) throw new Error("configuration file must contain an object");
 		assertConfigShape(parsed, "configuration file");
-		file = parsed as ConfigOverride;
+		const { configVersion: _configVersion, ...configuration } = parsed;
+		file = configuration as ConfigOverride;
 	}
 	assertConfigShape(options.explicit, "explicit configuration");
 	const result = resolveConfiguration({

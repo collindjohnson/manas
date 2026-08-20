@@ -71,9 +71,9 @@ function hash(content: Uint8Array): string {
 }
 
 function pageId(content: string): string {
-	const line = content.split("\n").find((value) => value.startsWith("nessie_id:"));
+	const line = content.split("\n").find((value) => value.startsWith("manas_id:"));
 	if (!line) return randomUUID();
-	const value = line.slice("nessie_id:".length).trim().replaceAll('"', "").replaceAll("'", "");
+	const value = line.slice(line.indexOf(":") + 1).trim().replaceAll('"', "").replaceAll("'", "");
 	return value || randomUUID();
 }
 

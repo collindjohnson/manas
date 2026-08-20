@@ -12,7 +12,7 @@ describe("source checkpoints", () => {
     const path = join(root, "codex", "baseline--ID.md");
     await Bun.write(path, [
       "---",
-      'nessie_id: "ID"',
+      'manas_id: "ID"',
       'provider: "codex"',
       'source_id: "source"',
       'original_updated_at: "2026-01-01 00:00:00.000"',

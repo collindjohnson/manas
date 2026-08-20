@@ -50,7 +50,7 @@ async function fixture(): Promise<{ root: string; config: Config }> {
 	};
 	await Bun.write(
 		join(archive, "codex", "chat.md"),
-		`---\nnessie_id: "N-1"\nprovider: "codex"\ntitle: "Example"\nsource_id: "source-1"\n---\n\nuser: hello world\n\nassistant: hello back\n`,
+		`---\nmanas_id: "N-1"\nprovider: "codex"\ntitle: "Example"\nsource_id: "source-1"\n---\n\nuser: hello world\n\nassistant: hello back\n`,
 	);
 	return { root, config };
 }

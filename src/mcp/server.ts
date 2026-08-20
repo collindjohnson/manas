@@ -112,8 +112,8 @@ const tools = [
 			"Find conversations sharing explicit frontmatter relationships.",
 		inputSchema: {
 			type: "object",
-			properties: { nessieId: { type: "string" } },
-			required: ["nessieId"],
+			properties: { manasId: { type: "string" } },
+			required: ["manasId"],
 			additionalProperties: false,
 		},
 	},
@@ -376,10 +376,11 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 					);
 					await saveState(config.stateRoot, state);
 				} else if (name === "related") {
-					only(args, ["nessieId"]);
-					if (typeof args.nessieId !== "string")
+					only(args, ["manasId", "nessieId"]);
+					const manasId = args.manasId ?? args.nessieId;
+					if (typeof manasId !== "string")
 						throw new Error("invalid params");
-					result = await relatedService(config, args.nessieId);
+					result = await relatedService(config, manasId);
 				} else if (name === "health" || name === "status") {
 					only(args, []);
 					result =

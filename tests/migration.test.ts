@@ -14,11 +14,11 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("legacy migration", () => {
-	test("copies archive files byte-for-byte and preserves Nessie IDs in the new manifest", async () => {
+	test("copies archive files byte-for-byte and preserves Manas IDs in the new manifest", async () => {
 		const root = await mkdtemp(join(tmpdir(), "brain-migration-"));
 		roots.push(root);
 		const legacy = join(root, "legacy");
-		await Bun.write(join(legacy, "codex", "chat.md"), "---\nnessie_id: \"KEEP\"\n---\n\nhello\n");
+		await Bun.write(join(legacy, "codex", "chat.md"), "---\nmanas_id: \"KEEP\"\n---\n\nhello\n");
 		await writeFile(join(legacy, "binary.dat"), new Uint8Array([0, 1, 2, 3]));
 		const brain = new BrainRepository(join(root, "brain"));
 		await brain.initialize();
@@ -26,7 +26,7 @@ describe("legacy migration", () => {
 		await execFile("git", ["-C", brain.root, "config", "user.email", "test@example.invalid"]);
 		const result = await migrateLegacyArchive(legacy, brain);
 		expect(result).toMatchObject({ copied: 2, documents: 1 });
-		expect(await readFile(join(brain.root, "codex", "chat.md"), "utf8")).toBe("---\nnessie_id: \"KEEP\"\n---\n\nhello\n");
+		expect(await readFile(join(brain.root, "codex", "chat.md"), "utf8")).toBe("---\nmanas_id: \"KEEP\"\n---\n\nhello\n");
 		expect([...await readFile(join(brain.root, "binary.dat"))]).toEqual([0, 1, 2, 3]);
 		expect(await readFile(join(brain.root, ".brain", "manifest.jsonl"), "utf8")).toContain('"id":"KEEP"');
 		expect((await brain.snapshot(result.commit)).pages).toMatchObject([{ id: "KEEP", path: "codex/chat.md" }]);
@@ -51,10 +51,10 @@ describe("legacy migration", () => {
 		roots.push(root);
 		const legacy = join(root, "legacy");
 		const target = join(root, "target");
-		await Bun.write(join(legacy, "notes", "one.md"), "---\nnessie_id: KEEP\n---\n\none\n");
+		await Bun.write(join(legacy, "notes", "one.md"), "---\nmanas_id: KEEP\n---\n\none\n");
 		await Bun.write(join(legacy, "notes", "two.md"), "two\n");
 		await Bun.write(join(legacy, ".hidden"), "ignored\n");
-		await Bun.write(join(target, "notes", "one.md"), "---\nnessie_id: KEEP\n---\n\nchanged\n");
+		await Bun.write(join(target, "notes", "one.md"), "---\nmanas_id: KEEP\n---\n\nchanged\n");
 		const report = await reconcileLegacyArchive(legacy, target);
 		expect(report).toMatchObject({ sourceFiles: 2, importedFiles: 1, collisions: 1, skippedFiles: 0 });
 		expect(report.ignoredFiles).toContain(".hidden");

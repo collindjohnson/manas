@@ -43,11 +43,11 @@ async function fixture(): Promise<Config> {
 	};
 	await Bun.write(
 		join(config.archiveRoot, "codex", "one.md"),
-		'---\nnessie_id: "one"\nprovider: "codex"\ntitle: "Deploy"\nproject: "brain"\nrepository: "repo"\nsource_path: "/work/brain/session.jsonl"\n---\n\nuser: deploy the service safely\n',
+		'---\nmanas_id: "one"\nprovider: "codex"\ntitle: "Deploy"\nproject: "brain"\nrepository: "repo"\nsource_path: "/work/brain/session.jsonl"\n---\n\nuser: deploy the service safely\n',
 	);
 	await Bun.write(
 		join(config.archiveRoot, "claude", "two.md"),
-		'---\nnessie_id: "two"\nprovider: "claude"\ntitle: "Rollback"\nproject: "brain"\nrepository: "repo"\n---\n\nassistant: deploy rollback procedure\n',
+		'---\nmanas_id: "two"\nprovider: "claude"\ntitle: "Rollback"\nproject: "brain"\nrepository: "repo"\n---\n\nassistant: deploy rollback procedure\n',
 	);
 	return config;
 }
@@ -61,22 +61,52 @@ describe("brain retrieval", () => {
 			"ZeroEntropy credential is not configured",
 		);
 		const results = await searchArchive(config, "deploy", { mode: "keyword" });
-		expect(results[0]).toMatchObject({ nessieId: "one", path: "codex/one.md" });
+		expect(results[0]).toMatchObject({ manasId: "one", path: "codex/one.md" });
 		const database = await openBrainDatabase(config.brain!.databasePath);
 		try {
 			expect(
-				relatedDocuments(database, "one").map((item) => item.nessieId),
+				relatedDocuments(database, "one").map((item) => item.manasId),
 			).toContain("two");
 			expect(
 				database
-					.prepare("SELECT source_path FROM documents WHERE nessie_id = 'one'")
+					.prepare("SELECT source_path FROM documents WHERE manas_id = 'one'")
 					.get(),
 			).toEqual({ source_path: "/work/brain/session.jsonl" });
 		} finally {
 			database.close();
 		}
 		const health = await brainHealth(config);
-		expect(health).toMatchObject({ indexedDocuments: 2, semantic: "degraded", readiness: { lexical: "ready", semantic: "degraded", reranking: "not_configured", synthesis: "not_configured" } });
+		expect(health).toMatchObject({ ok: true, indexedDocuments: 2, semantic: "degraded", readiness: { lexical: "ready", semantic: "degraded", reranking: "not_configured", synthesis: "not_configured" } });
+	});
+
+	test("uses configured local embeddings for archive indexing and semantic search", async () => {
+		const config = await fixture();
+		config.providers = {
+			embedding: {
+				endpoint: "http://127.0.0.1:11434/v1/embeddings",
+				model: "archive-local",
+				privacy: "local",
+				dimensions: 2,
+			},
+		};
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { input: string[] };
+			return new Response(JSON.stringify({
+				data: body.input.map((text) => ({ embedding: text.toLowerCase().includes("rollback") ? [1, 0] : [0, 1] })),
+			}));
+		}) as typeof fetch;
+		try {
+			const indexed = await indexArchive(config);
+			expect(indexed).toMatchObject({ localStatus: "complete", remoteStatus: "disabled", deferred: [] });
+			const outcome = await searchArchiveOutcome(config, "rollback", { mode: "semantic" });
+			expect(outcome).toMatchObject({ degraded: false, effectiveMode: "semantic" });
+			expect(outcome.results[0]).toMatchObject({ manasId: "two", path: "claude/two.md" });
+			const health = await brainHealth(config);
+			expect(health).toMatchObject({ credential: "local", semantic: "ready", readiness: { semantic: "ready" } });
+		} finally {
+			globalThis.fetch = original;
+		}
 	});
 
 	test("reindexes frontmatter-only changes without tombstoning retained chunk IDs", async () => {
@@ -85,7 +115,7 @@ describe("brain retrieval", () => {
 		const path = join(config.archiveRoot, "codex", "one.md");
 		await Bun.write(
 			path,
-			'---\nnessie_id: "one"\nprovider: "codex"\ntitle: "Safer deploy"\nproject: "brain"\nrepository: "repo"\nsource_path: "/work/brain/session.jsonl"\n---\n\nuser: deploy the service safely\n',
+			'---\nmanas_id: "one"\nprovider: "codex"\ntitle: "Safer deploy"\nproject: "brain"\nrepository: "repo"\nsource_path: "/work/brain/session.jsonl"\n---\n\nuser: deploy the service safely\n',
 		);
 		const refreshed = await indexArchive(config);
 		expect(refreshed).toMatchObject({ indexed: 1, skipped: 1 });
@@ -98,7 +128,7 @@ describe("brain retrieval", () => {
 			).toEqual({ count: 0 });
 			expect(
 				database
-					.prepare("SELECT title FROM documents WHERE nessie_id = 'one'")
+					.prepare("SELECT title FROM documents WHERE manas_id = 'one'")
 					.get(),
 			).toEqual({ title: "Safer deploy" });
 		} finally {
@@ -159,7 +189,7 @@ describe("brain retrieval", () => {
 		expect(
 			buildSynthesisPrompt("q", [
 				{
-					nessieId: "one",
+					manasId: "one",
 					path: "codex/one.md",
 					provider: "codex",
 					chunkId: "c",
@@ -178,11 +208,11 @@ describe("brain retrieval", () => {
 		let calls = 0;
 		globalThis.fetch = (async () => {
 			calls += 1;
-			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: "Deploy safely.", citations: [{ nessieId: "one", path: "codex/one.md" }], knowledgeGaps: [] }) } }] }));
+			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: "Deploy safely.", citations: [{ manasId: "one", path: "codex/one.md" }], knowledgeGaps: [] }) } }] }));
 		}) as unknown as typeof fetch;
 		try {
 			const result = await thinkService(config, "deploy");
-			expect(result).toMatchObject({ outcome: "answered", answer: "Deploy safely.", citations: [{ nessieId: "one", path: "codex/one.md" }] });
+			expect(result).toMatchObject({ outcome: "answered", answer: "Deploy safely.", citations: [{ manasId: "one", path: "codex/one.md" }] });
 			expect(calls).toBe(1);
 		} finally { globalThis.fetch = original; }
 	});

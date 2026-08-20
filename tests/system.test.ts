@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdir, readFile, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -71,6 +71,18 @@ describe("sync system", () => {
     expect(verification.errors).toEqual([]);
   });
 
+  test("reports malformed percent-encoded index links without crashing", async () => {
+    const config = await configDir();
+    const conversation = buildConversation("grok", "grok-malformed-link", join(tmpdir(), "grok"), {}, [{ role: "user", text: "Hi" }], "Grok");
+    await runSync(config, { conversations: [conversation!] });
+    const indexPath = join(config.archiveRoot, "grok", "INDEX.md");
+    await Bun.write(indexPath, `${await readFile(indexPath, "utf8")}\n- [Malformed](bad%ZZ.md)\n`);
+    await chmod(indexPath, 0o600);
+    const verification = await verifyArchive(config.archiveRoot);
+    expect(verification.ok).toBe(false);
+    expect(verification.errors).toContain(`${indexPath}: malformed percent-encoded index link bad%ZZ.md`);
+  });
+
 	test("LaunchAgent is local-time 2:00 and contains no secrets", () => {
 		if (false) {
     const config = { archiveRoot: "/tmp/archive", stateRoot: "/tmp/state", launchAgentPath: "/tmp/agent.plist" };
@@ -96,5 +108,13 @@ describe("sync system", () => {
     expect(await readFile(join(root, "sync.lock"), "utf8")).toContain("\n");
     release();
     await held;
+  });
+
+  test("recovers a sync lock whose owner no longer exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "manas-stale-lock-"));
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "sync.lock"), "2147483647\n", { mode: 0o600 });
+    await expect(withStateLock(root, async () => "recovered")).resolves.toBe("recovered");
+    await expect(stat(join(root, "sync.lock"))).rejects.toThrow();
   });
 });

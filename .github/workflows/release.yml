@@ -43,6 +43,12 @@ jobs:
       - run: bun run check:runtime-assets
       - run: bun test
       - run: MANAS_RELEASE_TAG="${GITHUB_REF_NAME}" MANAS_RELEASE_TARGET="${{ matrix.target }}" bun run build:release
+      - name: Apply and verify ad-hoc signature
+        run: |
+          ARTIFACT="dist/manas-${{ matrix.target }}"
+          codesign --force --sign - "$ARTIFACT"
+          codesign --verify --strict --verbose=2 "$ARTIFACT"
+          if [ "${{ matrix.target }}" = "darwin-arm64" ]; then lipo -archs "$ARTIFACT" | grep -qx arm64; else lipo -archs "$ARTIFACT" | grep -qx x86_64; fi
       - name: Verify the standalone binary from a fresh home
         run: |
           FRESH_HOME="$(mktemp -d)"
@@ -50,44 +56,15 @@ jobs:
           cd "$FRESH_HOME"
           "$GITHUB_WORKSPACE/dist/manas-${{ matrix.target }}" --version
           "$GITHUB_WORKSPACE/dist/manas-${{ matrix.target }}" setup --detect-only --allow-empty --json
-      - name: Require Apple release credentials
-        env:
-          MANAS_DEVELOPER_ID_P12: ${{ secrets.MANAS_DEVELOPER_ID_P12 }}
-          MANAS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MANAS_DEVELOPER_ID_P12_PASSWORD }}
-          MANAS_NOTARY_APPLE_ID: ${{ secrets.MANAS_NOTARY_APPLE_ID }}
-          MANAS_NOTARY_TEAM_ID: ${{ secrets.MANAS_NOTARY_TEAM_ID }}
-          MANAS_NOTARY_PASSWORD: ${{ secrets.MANAS_NOTARY_PASSWORD }}
+      - name: Package unsigned release
         run: |
-          test -n "$MANAS_DEVELOPER_ID_P12"
-          test -n "$MANAS_DEVELOPER_ID_P12_PASSWORD"
-          test -n "$MANAS_NOTARY_APPLE_ID"
-          test -n "$MANAS_NOTARY_TEAM_ID"
-          test -n "$MANAS_NOTARY_PASSWORD"
-      - name: Sign and notarize native binary
-        env:
-          MANAS_DEVELOPER_ID_P12: ${{ secrets.MANAS_DEVELOPER_ID_P12 }}
-          MANAS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MANAS_DEVELOPER_ID_P12_PASSWORD }}
-          MANAS_NOTARY_APPLE_ID: ${{ secrets.MANAS_NOTARY_APPLE_ID }}
-          MANAS_NOTARY_TEAM_ID: ${{ secrets.MANAS_NOTARY_TEAM_ID }}
-          MANAS_NOTARY_PASSWORD: ${{ secrets.MANAS_NOTARY_PASSWORD }}
-        run: |
-          KEYCHAIN="$RUNNER_TEMP/manas-release.keychain-db"
-          security create-keychain -p "$MANAS_DEVELOPER_ID_P12_PASSWORD" "$KEYCHAIN"
-          security unlock-keychain -p "$MANAS_DEVELOPER_ID_P12_PASSWORD" "$KEYCHAIN"
-          security import <(echo "$MANAS_DEVELOPER_ID_P12" | base64 -D) -k "$KEYCHAIN" -P "$MANAS_DEVELOPER_ID_P12_PASSWORD" -T "$(xcrun --find codesign)"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$MANAS_DEVELOPER_ID_P12_PASSWORD" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN"
           ARTIFACT="dist/manas-${{ matrix.target }}"
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F '"' 'index($0, "Developer ID Application:") { print $2; exit }')"
-          test -n "$IDENTITY"
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$ARTIFACT"
           codesign --verify --strict --verbose=2 "$ARTIFACT"
-          if [ "${{ matrix.target }}" = "darwin-arm64" ]; then lipo -archs "$ARTIFACT" | grep -qx arm64; else lipo -archs "$ARTIFACT" | grep -qx x86_64; fi
           mkdir "dist/package"
           cp "$ARTIFACT" "dist/package/manas"
           cp LICENSE "dist/package/LICENSE"
           printf '%s\n' "${GITHUB_REF_NAME#v}" > "dist/package/VERSION"
-          printf '%s\n' "target=${{ matrix.target }}" "sha256=$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')" > "dist/package/BUILD_METADATA"
+          printf '%s\n' "target=${{ matrix.target }}" "signing=ad-hoc" "notarized=false" "sha256=$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')" > "dist/package/BUILD_METADATA"
           chmod 755 "dist/package/manas"
           (
             cd dist/package
@@ -102,13 +79,11 @@ jobs:
             test -x manas
             cmp "$ARTIFACT" manas
           )
-          xcrun notarytool submit "dist/manas-${{ matrix.target }}.zip" --apple-id "$MANAS_NOTARY_APPLE_ID" --team-id "$MANAS_NOTARY_TEAM_ID" --password "$MANAS_NOTARY_PASSWORD" --wait
-          spctl --assess --type execute "$ARTIFACT"
           shasum -a 256 "dist/manas-${{ matrix.target }}.zip" > "dist/SHA256SUMS"
       - name: Normalize per-architecture checksum manifest
         run: |
           (cd dist && shasum -a 256 "manas-${{ matrix.target }}.zip" > SHA256SUMS)
-      - name: Attest signed release package and checksum
+      - name: Attest release package and checksum
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -133,7 +108,9 @@ jobs:
           name: manas-release-${{ github.ref_name }}-darwin-x64
           path: release/darwin-x64
       - run: |
-          (cd release && shasum -a 256 darwin-arm64/manas-darwin-arm64.zip darwin-x64/manas-darwin-x64.zip > SHA256SUMS)
+          cp release/darwin-arm64/manas-darwin-arm64.zip release/manas-darwin-arm64.zip
+          cp release/darwin-x64/manas-darwin-x64.zip release/manas-darwin-x64.zip
+          (cd release && shasum -a 256 manas-darwin-arm64.zip manas-darwin-x64.zip > SHA256SUMS)
           (cd release && shasum -a 256 -c SHA256SUMS)
       - name: Require and verify every native artifact
         run: |
@@ -145,6 +122,6 @@ jobs:
             test -s "${directory}${separator}SHA256SUMS"
             (cd "$directory" && shasum -a 256 -c SHA256SUMS)
           done
-      - run: gh release create "${GITHUB_REF_NAME}" release/darwin-arm64/manas-darwin-arm64.zip release/darwin-x64/manas-darwin-x64.zip release/SHA256SUMS --title "Manas ${GITHUB_REF_NAME}" --generate-notes
+      - run: gh release create "${GITHUB_REF_NAME}" release/manas-darwin-arm64.zip release/manas-darwin-x64.zip release/SHA256SUMS --title "Manas ${GITHUB_REF_NAME}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

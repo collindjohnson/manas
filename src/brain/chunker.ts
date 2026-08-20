@@ -61,9 +61,9 @@ export function chunkDocument(
 		const textHash = sha256(text);
 		return {
 			id: sha256(
-				`${document.nessieId}:${ordinal}:${textHash}:${CHUNKING_VERSION}`,
+				`${document.manasId}:${ordinal}:${textHash}:${CHUNKING_VERSION}`,
 			),
-			documentId: document.nessieId,
+			documentId: document.manasId,
 			ordinal,
 			role,
 			startOffset: safeStart,

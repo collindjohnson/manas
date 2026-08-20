@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { configuredArchiveEmbeddingProvider, countArchiveEmbeddings } from "@manas-brain-archive-embeddings";
 import type { Config } from "../config";
 import { scanArchive } from "../archive";
 import { assertBrainIntegrity, openBrainDatabase } from "./database";
@@ -17,7 +18,7 @@ export interface BrainHealth {
 	failedChunks: number;
 	tombstones: number;
 	semantic: "ready" | "degraded";
-	credential: "environment" | "keychain" | "missing";
+	credential: "environment" | "keychain" | "local" | "missing";
 	checkpoints: {
 		pending: number;
 		uploaded: number;
@@ -44,6 +45,7 @@ export interface BrainHealth {
 export async function brainHealth(config: Config): Promise<BrainHealth> {
 	const brain = config.brain;
 	if (!brain) throw new Error("brain configuration is unavailable");
+	const localEmbeddingProvider = configuredArchiveEmbeddingProvider(config);
 	const scan = await scanArchive(config.archiveRoot);
 	const warnings = [...scan.warnings];
 	try {
@@ -59,7 +61,7 @@ export async function brainHealth(config: Config): Promise<BrainHealth> {
 			failedChunks: 0,
 			tombstones: 0,
 			semantic: "degraded",
-			credential: "missing",
+			credential: localEmbeddingProvider ? "local" : "missing",
 			checkpoints: { pending: 0, uploaded: 0, indexed: 0, failed: 0 },
 			warnings: [...warnings, "index database has not been created; run index"],
 			readiness: { lexical: "degraded", semantic: "degraded", reranking: brain.rerankerEndpoint && brain.rerankerModel ? "configured" : "not_configured", synthesis: brain.generationEndpoint && brain.generationModel ? "configured" : "not_configured" },
@@ -115,24 +117,23 @@ export async function brainHealth(config: Config): Promise<BrainHealth> {
 		);
 		if (indexedDocuments !== scan.documents.length)
 			warnings.push("index is stale; run index");
-		const credential = await resolveZeroEntropyCredential(
-			brain.keychainService,
-			brain.keychainAccount,
-		);
-		if (!credential.value)
-			warnings.push(
-				"semantic search is unavailable: ZeroEntropy credential is not configured",
-			);
+		const credential = localEmbeddingProvider
+			? { value: "local", source: "local" as const }
+			: await resolveZeroEntropyCredential(
+					brain.keychainService,
+					brain.keychainAccount,
+				);
+		if (localEmbeddingProvider) {
+			if (countArchiveEmbeddings(database, localEmbeddingProvider) < indexedChunks)
+				warnings.push("semantic index is stale; run index");
+			} else if (!credential.value)
+			warnings.push("semantic search is unavailable: ZeroEntropy credential is not configured");
 		else if (synchronizedChunks !== indexedChunks)
-			warnings.push(
-				uploadedChunks
-					? "semantic indexing is pending remote completion"
-					: "semantic index is stale; run index",
-			);
-		if (failedChunks) warnings.push("semantic synchronization has failed work");
-		if (tombstones) warnings.push("semantic deletions are pending");
+			warnings.push(uploadedChunks ? "semantic indexing is pending remote completion" : "semantic index is stale; run index");
+		if (!localEmbeddingProvider && failedChunks) warnings.push("semantic synchronization has failed work");
+		if (!localEmbeddingProvider && tombstones) warnings.push("semantic deletions are pending");
 		let zeroEntropy: "ready" | "degraded" | "not-checked" = "not-checked";
-		if (credential.value) {
+		if (credential.value && !localEmbeddingProvider) {
 			try {
 				await createZeroEntropyClient({
 					baseUrl: brain.zeroEntropyBaseUrl,
@@ -147,6 +148,13 @@ export async function brainHealth(config: Config): Promise<BrainHealth> {
 				warnings.push("ZeroEntropy live health check failed");
 			}
 		}
+		const optionalSemanticWarnings = !localEmbeddingProvider && !credential.value
+			? new Set([
+					"semantic search is unavailable: ZeroEntropy credential is not configured",
+					"semantic deletions are pending",
+				])
+			: new Set<string>();
+		const coreWarnings = warnings.filter((warning) => !optionalSemanticWarnings.has(warning));
 		const latestRun = database
 			.prepare(
 				"SELECT status, local_status, remote_status FROM index_runs ORDER BY id DESC LIMIT 1",
@@ -157,7 +165,7 @@ export async function brainHealth(config: Config): Promise<BrainHealth> {
 			remote_status?: string;
 		} | null;
 		return {
-			ok: warnings.length === 0,
+			ok: coreWarnings.length === 0,
 			archiveDocuments: scan.documents.length,
 			indexedDocuments,
 			indexedChunks,

@@ -165,8 +165,9 @@ export async function handleMcpHttpRequest(config: Config | Record<string, never
 		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.thinkService(config as Config, args.question)) }] };
 	}
 	if (name === "related") {
-		if (typeof args.nessieId !== "string") throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.relatedService(config as Config, args.nessieId)) }] };
+		const manasId = args.manasId ?? args.nessieId;
+		if (typeof manasId !== "string") throw new Error("invalid params");
+		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.relatedService(config as Config, manasId)) }] };
 	}
 	if (name === "sources_list") {
 		if (Object.keys(args).length) throw new Error("invalid params");

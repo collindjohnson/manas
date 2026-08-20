@@ -42,13 +42,13 @@ export async function thinkService(config: Config, question: string) {
 	return think(config, question);
 }
 
-export async function getService(config: Config, nessieId: string) {
-	if (!nessieId) throw new Error("document not found");
+export async function getService(config: Config, manasId: string) {
+	if (!manasId) throw new Error("document not found");
 	const database = await openBrainDatabase(config.brain!.databasePath);
 	try {
 		const row = database
-			.prepare("SELECT relative_path FROM documents WHERE nessie_id = ?")
-			.get(nessieId) as { relative_path?: string } | null;
+			.prepare("SELECT relative_path FROM documents WHERE manas_id = ?")
+			.get(manasId) as { relative_path?: string } | null;
 		if (!row?.relative_path) throw new Error("document not found");
 		return readFile(
 			join(
@@ -62,11 +62,11 @@ export async function getService(config: Config, nessieId: string) {
 	}
 }
 
-export async function relatedService(config: Config, nessieId: string) {
-	if (!nessieId) throw new Error("document not found");
+export async function relatedService(config: Config, manasId: string) {
+	if (!manasId) throw new Error("document not found");
 	const database = await openBrainDatabase(config.brain!.databasePath);
 	try {
-		return relatedDocuments(database, nessieId);
+		return relatedDocuments(database, manasId);
 	} finally {
 		database.close();
 	}

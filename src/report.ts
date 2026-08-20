@@ -70,7 +70,19 @@ async function checkIndexLinks(root: string, errors: string[]): Promise<void> {
       else if (entry.name === "INDEX.md") {
         const text = await readFile(path, "utf8");
         for (const match of text.matchAll(/(?<!\\)\]\(([^)]+\.md)\)/g)) {
-          const target = join(directory, decodeURIComponent(match[1]));
+          const literalTarget = join(directory, match[1]);
+          try {
+            await stat(literalTarget);
+            continue;
+          } catch {}
+          let decodedTarget: string;
+          try {
+            decodedTarget = decodeURIComponent(match[1]);
+          } catch {
+            errors.push(`${path}: malformed percent-encoded index link ${match[1]}`);
+            continue;
+          }
+          const target = join(directory, decodedTarget);
           try { await stat(target); } catch { errors.push(`${path}: broken index link ${match[1]}`); }
         }
       }
@@ -86,9 +98,9 @@ export async function verifyArchive(root: string): Promise<VerificationResult> {
   errors.push(...scan.warnings);
   const ids = new Set<string>();
   for (const document of scan.documents) {
-    if (ids.has(document.nessieId)) errors.push(`duplicate nessie_id ${document.nessieId}`);
-    ids.add(document.nessieId);
-    if (!document.path.endsWith(`${document.nessieId}.md`)) warnings.push(`${relative(root, document.path)}: filename does not end in Nessie ID`);
+	    if (ids.has(document.manasId)) errors.push(`duplicate manas_id ${document.manasId}`);
+	    ids.add(document.manasId);
+	    if (!document.path.endsWith(`${document.manasId}.md`)) warnings.push(`${relative(root, document.path)}: filename does not end in Manas ID`);
     if (redactSecrets(document.body).count) errors.push(`${relative(root, document.path)}: credential pattern found in body`);
     if (!document.body.endsWith("\n")) warnings.push(`${relative(root, document.path)}: body does not end with newline`);
   }

@@ -3,7 +3,7 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import type { ArchiveDocument } from "./model";
 import { parseFrontmatter, type ArchiveScan } from "./archive";
 
-const PROVIDER_FOLDERS = ["claude", "codex", "pi", "cursor", "grok", "chatgpt", "profile", "contexts", "nessie", "obsidian"];
+const PROVIDER_FOLDERS = ["claude", "codex", "pi", "cursor", "grok", "chatgpt", "profile", "contexts", "obsidian"];
 
 function value(document: ArchiveDocument, key: string): string {
   const parsed = parseFrontmatter(document.frontmatter);

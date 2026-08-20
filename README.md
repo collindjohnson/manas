@@ -9,10 +9,10 @@ bun install
 bun run src/cli.ts setup --detect-only --json
 bun run src/cli.ts setup --preview --json
 # After reviewing the preview:
-bun run src/cli.ts setup --yes --json
+bun run src/cli.ts setup --yes --no-schedule --json
 ```
 
-`setup` detects local Claude Code, Codex, Pi, Cursor, and Grok chats, previews the first sync, and requires explicit `--yes` approval before enabling the daily macOS scheduler. Synced Markdown stays in Manas's own data area by default.
+This source-checkout flow is intended for development and manual synchronization. For self-installation and the daily macOS scheduler, use a release binary as described below. `setup` detects local Claude Code, Codex, Pi, Cursor, and Grok chats and previews the first sync. Synced Markdown stays in Manas's own data area by default.
 
 To use an Obsidian vault or another archive location:
 
@@ -41,6 +41,20 @@ bun run src/cli.ts brain embed --store <local-pglite-directory> --embedding-endp
 ```
 
 Use the same endpoint, model, and dimensions for semantic retrieval. Vectors stay in local PGLite; Markdown in the knowledge repository is unchanged.
+
+To use the same local provider for the default archived-chat index and MCP `search` tool, configure it before indexing:
+
+```sh
+export MANAS_PROVIDER_EMBEDDING_ENDPOINT=http://127.0.0.1:11434/v1/embeddings
+export MANAS_PROVIDER_EMBEDDING_MODEL=embeddinggemma:latest
+export MANAS_PROVIDER_EMBEDDING_PRIVACY=local
+export MANAS_PROVIDER_EMBEDDING_DIMENSIONS=768
+
+bun run src/cli.ts index
+bun run src/cli.ts search "what did we decide?" --semantic-only
+```
+
+When `MANAS_PROVIDER_EMBEDDING_*` is configured, legacy archive indexing and semantic retrieval use the local provider and do not contact ZeroEntropy. Without it, the existing ZeroEntropy path remains the fallback. `manas serve` uses the same configuration for MCP search.
 
 ## Commands
 
@@ -90,7 +104,7 @@ All product environment variables use the `MANAS_` prefix. Set `MANAS_STATE` to 
 
 `serve` starts a local MCP server. For loopback HTTP MCP, set a non-secret local token with `MANAS_MCP_TOKEN` and use `MANAS_MCP_SCOPES` to restrict access. Do not put credentials or local state inside the repository.
 
-Manas can optionally use ZeroEntropy for managed semantic retrieval. That sends bounded transcript chunks to the configured service. Local PGLite embeddings are the privacy-preserving path; `health` reports optional remote services as degraded when unavailable.
+Manas can optionally use ZeroEntropy for managed semantic retrieval. That sends bounded transcript chunks to the configured service. Local embeddings are the privacy-preserving path for both PGLite and the legacy archive projection; `health` reports the configured local model separately and only checks ZeroEntropy when no local embedding provider is configured.
 
 ## Development
 
@@ -102,7 +116,7 @@ The release gate validates capability parity, runbooks, a disposable pgvector/Po
 
 ## Releases
 
-Releases are created by pushing a version tag that exactly matches `package.json`, for example `v0.1.0`. The release workflow reruns the full verification gate, compiles native macOS binaries (`manas-darwin-arm64` and `manas-darwin-x64`), and publishes both with a `SHA256SUMS` checksum manifest.
+Releases are created by pushing a version tag that exactly matches `package.json`, for example `v0.1.0`. The release workflow reruns the full verification gate, compiles native macOS binaries (`manas-darwin-arm64` and `manas-darwin-x64`), applies an ad-hoc signature, and publishes both with a `SHA256SUMS` checksum manifest and GitHub build-provenance attestations. Release binaries are not signed with an Apple Developer ID or notarized by Apple.
 
 To prepare the same artifacts locally:
 
@@ -122,7 +136,21 @@ shasum -a 256 -c SHA256SUMS
 unzip manas-darwin-arm64.zip
 ```
 
-Replace `darwin-arm64` with `darwin-x64` for an Intel Mac. Use the verified release binary's `install` subcommand to atomically install or upgrade the user-local `manas` command, then run `manas --version`. A source checkout is supported for development and manual `--no-schedule` sync only; scheduling, repair, and self-install require a release binary.
+Replace `darwin-arm64` with `darwin-x64` for an Intel Mac. Because the public binaries are not Apple-notarized, macOS may quarantine the downloaded executable. After verifying the checksum, remove quarantine from that executable:
+
+```sh
+xattr -d com.apple.quarantine manas
+chmod +x manas
+env PATH=".:$PATH" manas install
+export PATH="$HOME/.local/bin:$PATH"
+manas --version
+manas setup --detect-only --json
+manas setup --preview --json
+# After reviewing the preview:
+manas setup --yes --json
+```
+
+The `install` subcommand atomically installs or upgrades the user-local `manas` command. Add the displayed `PATH` export to your shell profile if a later terminal cannot find it. A source checkout is supported for development and manual `--no-schedule` sync only; scheduling, repair, and self-install require a release binary.
 
 For a safe first run, use the detect and preview commands shown above before `setup --yes`. Scheduled runs leave secure receipts below the configured state directory. Archive Markdown, local state, logs, PGlite data, configuration, and scheduler plist files remain on the machine; inspect the setup JSON for resolved locations.
 
@@ -138,7 +166,7 @@ Legacy chat-history-sync jobs are retained by default. After explicit consent, r
 
 To uninstall Manas, unload or retire the scheduler first, remove the installed `manas` binary and configuration, then delete archive and state directories only if their retained conversation data is no longer wanted.
 
-If macOS Gatekeeper blocks an otherwise verified release, inspect its signing and quarantine status with Finder or `spctl`, then obtain and verify a fresh release artifact rather than bypassing verification. For release troubleshooting, include the selected architecture, `manas --version`, setup JSON, receipt status, and the safe log paths reported by setup.
+If macOS still blocks a checksum-verified release after quarantine is removed, inspect its ad-hoc signature with `codesign --verify --strict --verbose=2 manas` and obtain a fresh release artifact if verification fails. For release troubleshooting, include the selected architecture, `manas --version`, setup JSON, receipt status, and the safe log paths reported by setup.
 
 ## License
 

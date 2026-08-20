@@ -175,6 +175,7 @@ async function defaultDependencies(): Promise<SetupDependencies> {
 				executable: process.execPath,
 				configPath,
 				startedAt,
+				timeoutMs: 120_000,
 			}, {
 				run: async (command) => Bun.spawn(command).exited,
 				waitForReceipt: (after, timeoutMs) => waitForScheduledSyncReceipt(config.stateRoot, after, timeoutMs),

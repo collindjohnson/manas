@@ -30,6 +30,7 @@ revision, and immutable Git commit.
 
 ## ADR-005: Legacy retention during migration
 
-The legacy archive, SQLite database, and ZeroEntropy collection remain read-only and
-are never automatically deleted. Cutover depends on reconciliation and shadow
+The legacy archive and existing ZeroEntropy collection remain preserved and are
+never automatically deleted. Local embedding vectors may be built as a separate
+SQLite projection alongside them. Cutover depends on reconciliation and shadow
 verification; rollback switches reads or rebuilds a projection from a verified commit.

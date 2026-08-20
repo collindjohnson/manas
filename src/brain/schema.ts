@@ -1,4 +1,4 @@
-export const BRAIN_SCHEMA_VERSION = 7;
+export const BRAIN_SCHEMA_VERSION = 9;
 const pathSeparator = String.fromCharCode(47);
 
 export interface SchemaPack {
@@ -104,32 +104,41 @@ export const INTEGRITY_CHECK = "PRAGMA integrity_check";
 export const DATABASE_PRAGMAS =
 	"PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;";
 export const SELECT_DOCUMENT_HASH =
-	"SELECT body_hash FROM documents WHERE nessie_id = ?";
-export const SELECT_DOCUMENT_IDS = "SELECT nessie_id FROM documents";
-export const DELETE_DOCUMENT = "DELETE FROM documents WHERE nessie_id = ?";
+	"SELECT body_hash FROM documents WHERE manas_id = ?";
+export const SELECT_DOCUMENT_IDS = "SELECT manas_id FROM documents";
+export const DELETE_DOCUMENT = "DELETE FROM documents WHERE manas_id = ?";
 export const INSERT_DOCUMENT =
-	"INSERT INTO documents (nessie_id, relative_path, provider, kind, source_id, source_path, title, project, repository, workspace, created_at, updated_at, frontmatter_hash, body_hash, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+	"INSERT INTO documents (manas_id, relative_path, provider, kind, source_id, source_path, title, project, repository, workspace, created_at, updated_at, frontmatter_hash, body_hash, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 export const INSERT_CHUNK =
 	"INSERT INTO chunks (id, document_id, ordinal, role, start_offset, end_offset, text, text_hash, contextual_prefix, size_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 export const INSERT_FTS =
 	"INSERT INTO chunks_fts (chunk_id, text, title, project, repository, provider) VALUES (?, ?, ?, ?, ?, ?)";
 export const SEARCH_FTS =
-	"SELECT c.id AS chunk_id, c.text, d.nessie_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.nessie_id = c.document_id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?";
+	"SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.manas_id = c.document_id WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?";
 
 export const BRAIN_SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents (
-  nessie_id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+  manas_id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
   kind TEXT, source_id TEXT, source_path TEXT, title TEXT, project TEXT, repository TEXT, workspace TEXT,
   created_at TEXT, updated_at TEXT, frontmatter_hash TEXT NOT NULL, body_hash TEXT NOT NULL, indexed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chunks (
-  id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(nessie_id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(manas_id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL, role TEXT, start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
   text TEXT NOT NULL, text_hash TEXT NOT NULL, contextual_prefix TEXT NOT NULL, size_estimate INTEGER NOT NULL,
   UNIQUE(document_id, ordinal)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(chunk_id UNINDEXED, text, title, project, repository, provider);
+CREATE TABLE IF NOT EXISTS local_chunk_embeddings (
+  chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  model_fingerprint TEXT NOT NULL,
+  dimensions INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(chunk_id, model_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS local_chunk_embeddings_model ON local_chunk_embeddings(model_fingerprint, dimensions);
 CREATE TABLE IF NOT EXISTS remote_chunks (
   chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE, collection_name TEXT NOT NULL,
   content_hash TEXT NOT NULL, status TEXT NOT NULL, last_upserted_at TEXT, last_error TEXT

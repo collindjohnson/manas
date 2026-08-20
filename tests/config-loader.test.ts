@@ -35,6 +35,26 @@ describe("configuration loader", () => {
 		}
 	});
 
+	test("loads the versioned configuration written by setup", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
+		try {
+			const path = join(root, "config.json");
+			await writeFile(path, JSON.stringify({
+				configVersion: 1,
+				archiveRoot: join(root, "archive"),
+				stateRoot: join(root, "state"),
+				launchAgentPath: join(root, "agent.plist"),
+			}));
+			const config = await loadConfig({ filePath: path, environment: {} });
+			expect(config.archiveRoot).toBe(join(root, "archive"));
+			expect(config).not.toHaveProperty("configVersion");
+			await writeFile(path, JSON.stringify({ configVersion: 2 }));
+			await expect(loadConfig({ filePath: path, environment: {} })).rejects.toThrow("unsupported configuration version");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("does not allow a file to bypass bounded retrieval settings", async () => {
 		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
 		try {

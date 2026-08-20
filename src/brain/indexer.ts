@@ -1,4 +1,5 @@
 import { relative } from "node:path";
+import { configuredArchiveEmbeddingProvider, indexArchiveEmbeddings } from "@manas-brain-archive-embeddings";
 import type { Database } from "bun:sqlite";
 import { scanArchive, parseFrontmatter } from "../archive";
 import type { Config } from "../config";
@@ -27,7 +28,7 @@ export interface IndexResult {
 	chunks: number;
 	deferred: string[];
 	localStatus: "complete" | "failed";
-	remoteStatus: "complete" | "degraded" | "pending";
+	remoteStatus: "complete" | "degraded" | "pending" | "disabled";
 }
 
 type PayloadRow = {
@@ -81,7 +82,7 @@ function repairCollectionCheckpoints(
 ): void {
 	const rows = database
 		.prepare(
-			"SELECT c.id, c.text, c.contextual_prefix, c.start_offset, c.end_offset, c.document_id, c.role, d.provider, d.project, d.repository, d.workspace, d.relative_path, d.source_path, d.created_at, d.updated_at FROM chunks c JOIN documents d ON d.nessie_id = c.document_id",
+			"SELECT c.id, c.text, c.contextual_prefix, c.start_offset, c.end_offset, c.document_id, c.role, d.provider, d.project, d.repository, d.workspace, d.relative_path, d.source_path, d.created_at, d.updated_at FROM chunks c JOIN documents d ON d.manas_id = c.document_id",
 		)
 		.all() as PayloadRow[];
 	for (const row of rows) {
@@ -95,13 +96,13 @@ function repairCollectionCheckpoints(
 }
 function deleteDocument(
 	database: Database,
-	nessieId: string,
+	manasId: string,
 	collection: string,
 	retainedIds = new Set<string>(),
 ): void {
 	const ids = database
 		.prepare("SELECT id FROM chunks WHERE document_id = ?")
-		.all(nessieId) as Array<{ id: string }>;
+		.all(manasId) as Array<{ id: string }>;
 	for (const { id } of ids)
 		if (!retainedIds.has(id))
 			database
@@ -113,8 +114,8 @@ function deleteDocument(
 		.prepare(
 			"DELETE FROM chunks_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)",
 		)
-		.run(nessieId);
-	database.prepare(DELETE_DOCUMENT).run(nessieId);
+		.run(manasId);
+	database.prepare(DELETE_DOCUMENT).run(manasId);
 }
 
 export async function indexArchive(
@@ -123,6 +124,7 @@ export async function indexArchive(
 ): Promise<IndexResult> {
 	const brain = config.brain;
 	if (!brain) throw new Error("brain configuration is unavailable");
+	const localEmbeddingProvider = configuredArchiveEmbeddingProvider(config);
 	return withIndexLock(config.stateRoot, async () => {
 		const database = await openBrainDatabase(brain.databasePath);
 		let runId: number | undefined;
@@ -151,25 +153,25 @@ export async function indexArchive(
 			let skipped = 0;
 			let chunks = 0;
 			const currentIds = new Set(
-				scan.documents.map((document) => document.nessieId),
+				scan.documents.map((document) => document.manasId),
 			);
 			for (const row of database.prepare(SELECT_DOCUMENT_IDS).all() as Array<{
-				nessie_id: string;
+				manas_id: string;
 			}>)
-				if (!currentIds.has(row.nessie_id))
+				if (!currentIds.has(row.manas_id))
 					inTransaction(database, () =>
 						deleteDocument(
 							database,
-							row.nessie_id,
+							row.manas_id,
 							brain.zeroEntropyCollection,
 						),
 					);
 			for (const document of scan.documents) {
 				const prior = database
 					.prepare(
-						"SELECT body_hash, frontmatter_hash FROM documents WHERE nessie_id = ?",
+						"SELECT body_hash, frontmatter_hash FROM documents WHERE manas_id = ?",
 					)
-					.get(document.nessieId) as {
+					.get(document.manasId) as {
 					body_hash?: string;
 					frontmatter_hash?: string;
 				} | null;
@@ -195,14 +197,14 @@ export async function indexArchive(
 					if (prior)
 						deleteDocument(
 							database,
-							document.nessieId,
+							document.manasId,
 							brain.zeroEntropyCollection,
 							new Set(documentChunks.map((chunk) => chunk.id)),
 						);
 					database
 						.prepare(INSERT_DOCUMENT)
 						.run(
-							document.nessieId,
+							document.manasId,
 							relative(config.archiveRoot, document.path),
 							document.provider,
 							values.kind ?? null,
@@ -288,7 +290,7 @@ export async function indexArchive(
 							.run(brain.zeroEntropyCollection, chunk.id, payloadHash);
 					}
 					replaceDocumentGraph(database, {
-						nessieId: document.nessieId,
+						manasId: document.manasId,
 						provider: document.provider,
 						project: values.project,
 						repository: values.repository,
@@ -299,6 +301,17 @@ export async function indexArchive(
 				indexed++;
 				chunks += documentChunks.length;
 			}
+			let localStatus: "complete" | "failed" = "complete";
+			let remoteStatus: "complete" | "degraded" | "pending" | "disabled" = "disabled";
+			let outstanding = 0;
+			if (localEmbeddingProvider) {
+				try {
+					await indexArchiveEmbeddings(database, localEmbeddingProvider, brain.zeroEntropyBatchSize);
+				} catch (error) {
+					localStatus = "failed";
+					deferred.push(error instanceof Error ? `local embedding indexing failed: ${error.message}` : "local embedding indexing failed");
+				}
+			} else {
 			// Collection checkpoints are independent. A collection-name change starts a
 			// safe reconciliation for the new collection without deleting prior history.
 			repairCollectionCheckpoints(database, brain.zeroEntropyCollection);
@@ -321,7 +334,7 @@ export async function indexArchive(
 					await client.ensureCollection();
 					const pending = database
 						.prepare(
-							"SELECT c.id, c.text, c.contextual_prefix, c.start_offset, c.end_offset, c.document_id, c.role, d.provider, d.project, d.repository, d.workspace, d.relative_path, d.source_path, d.created_at, d.updated_at FROM remote_chunk_checkpoints r JOIN chunks c ON c.id = r.chunk_id JOIN documents d ON d.nessie_id = c.document_id WHERE r.collection_name = ? AND (r.status = 'pending' OR (r.status = 'failed' AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ?)) ORDER BY r.chunk_id",
+							"SELECT c.id, c.text, c.contextual_prefix, c.start_offset, c.end_offset, c.document_id, c.role, d.provider, d.project, d.repository, d.workspace, d.relative_path, d.source_path, d.created_at, d.updated_at FROM remote_chunk_checkpoints r JOIN chunks c ON c.id = r.chunk_id JOIN documents d ON d.manas_id = c.document_id WHERE r.collection_name = ? AND (r.status = 'pending' OR (r.status = 'failed' AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ?)) ORDER BY r.chunk_id",
 						)
 						.all(
 							brain.zeroEntropyCollection,
@@ -489,7 +502,7 @@ export async function indexArchive(
 						)
 						.run(message, brain.zeroEntropyCollection);
 				}
-			const outstanding = Number(
+			outstanding = Number(
 				(
 					database
 						.prepare(
@@ -498,22 +511,24 @@ export async function indexArchive(
 						.get(brain.zeroEntropyCollection) as { count: number }
 				).count,
 			);
-			const remoteStatus = deferred.length
+			remoteStatus = deferred.length
 				? "degraded"
 				: outstanding
 					? "pending"
 					: "complete";
+			}
 			database
 				.prepare(
-					"UPDATE index_runs SET finished_at = ?, status = ?, documents_indexed = ?, chunks_indexed = ?, documents_scanned = ?, remote_pending = ?, local_status = 'complete', remote_status = ?, summary = ? WHERE id = ?",
+					"UPDATE index_runs SET finished_at = ?, status = ?, documents_indexed = ?, chunks_indexed = ?, documents_scanned = ?, remote_pending = ?, local_status = ?, remote_status = ?, summary = ? WHERE id = ?",
 				)
 				.run(
 					new Date().toISOString(),
-					remoteStatus === "complete" ? "complete" : "degraded",
+					localStatus === "complete" && (remoteStatus === "complete" || remoteStatus === "disabled") ? "complete" : "degraded",
 					indexed,
 					chunks,
 					scan.documents.length,
 					outstanding,
+					localStatus,
 					remoteStatus,
 					"local reconciliation completed",
 					runId,
@@ -524,7 +539,7 @@ export async function indexArchive(
 				skipped,
 				chunks,
 				deferred: [...new Set(deferred)],
-				localStatus: "complete",
+				localStatus,
 				remoteStatus,
 			};
 		} catch {
@@ -532,10 +547,11 @@ export async function indexArchive(
 			if (runId !== undefined)
 				database
 					.prepare(
-						"UPDATE index_runs SET finished_at = ?, status = 'failed', local_status = 'failed', remote_status = 'pending', summary = ? WHERE id = ?",
+						"UPDATE index_runs SET finished_at = ?, status = 'failed', local_status = 'failed', remote_status = ?, summary = ? WHERE id = ?",
 					)
 					.run(
 						new Date().toISOString(),
+						localEmbeddingProvider ? "disabled" : "pending",
 						error instanceof Error
 							? error.message.replace(/[\r\n]/g, " ").slice(0, 500)
 							: "indexing failed",
