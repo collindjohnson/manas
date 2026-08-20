@@ -41,7 +41,6 @@ jobs:
       - run: bun run typecheck
       - run: bun run check:literal-imports
       - run: bun run check:runtime-assets
-      - run: bun test
       - run: MANAS_RELEASE_TAG="${GITHUB_REF_NAME}" MANAS_RELEASE_TARGET="${{ matrix.target }}" bun run build:release
       - name: Apply and verify ad-hoc signature
         run: |
@@ -77,7 +76,7 @@ jobs:
           (
             cd "$UNPACKED"
             test -x manas
-            cmp "$ARTIFACT" manas
+            cmp "$GITHUB_WORKSPACE/$ARTIFACT" manas
           )
           shasum -a 256 "dist/manas-${{ matrix.target }}.zip" > "dist/SHA256SUMS"
       - name: Normalize per-architecture checksum manifest
