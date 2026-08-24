@@ -42,27 +42,22 @@ bun run src/cli.ts brain embed --store <local-pglite-directory> --embedding-endp
 
 Use the same endpoint, model, and dimensions for semantic retrieval. Vectors stay in local PGLite; Markdown in the knowledge repository is unchanged.
 
-To use the same local provider for the default archived-chat index and MCP `search` tool, configure it before indexing:
+To use the same local provider for the default archived-chat index and MCP `search` tool, put it in the configuration written by `manas setup`. Installed commands automatically load the setup-generated user configuration:
 
 ```sh
-export MANAS_PROVIDER_EMBEDDING_ENDPOINT=http://127.0.0.1:11434/v1/embeddings
-export MANAS_PROVIDER_EMBEDDING_MODEL=embeddinggemma:latest
-export MANAS_PROVIDER_EMBEDDING_PRIVACY=local
-export MANAS_PROVIDER_EMBEDDING_DIMENSIONS=768
-
-bun run src/cli.ts index
-bun run src/cli.ts search "what did we decide?" --semantic-only
+manas index
+manas search "what did we decide?" --semantic-only
 ```
 
-When `MANAS_PROVIDER_EMBEDDING_*` is configured, legacy archive indexing and semantic retrieval use the local provider and do not contact ZeroEntropy. Without it, the existing ZeroEntropy path remains the fallback. `manas serve` uses the same configuration for MCP search.
+Configuration-file selection follows `--config`, then `MANAS_CONFIG_FILE`, then the setup-generated `.config/manas/config.json` file in your home directory, and finally built-in defaults. `--config` is global and may appear before or after the command. When a local embedding provider is configured, legacy archive indexing and semantic retrieval use it and do not contact ZeroEntropy. Without one, the existing ZeroEntropy path remains the fallback. `manas serve` uses the same configuration for MCP search.
 
 ## Commands
 
 ```sh
-manas setup [--archive <path>] [--yes] [--no-schedule] [--detect-only|--preview|--repair] [--retire-legacy] [--json]
-manas sync [--config <path>] [--provider <name>] [--dry-run|--scheduled]
+manas [--config <path>] setup [--archive <path>] [--yes] [--no-schedule] [--detect-only|--preview|--repair] [--retire-legacy] [--json]
+manas [--config <path>] sync [--provider <name>] [--dry-run|--scheduled]
 manas install
-manas sync-status [--config <path>]
+manas [--config <path>] sync-status
 manas import chatgpt <zip-or-json>
 manas import claude <zip-or-json>
 manas brain init --repo <knowledge-repository>
@@ -116,12 +111,12 @@ The release gate validates capability parity, runbooks, a disposable pgvector/Po
 
 ## Releases
 
-Releases are created by pushing a version tag that exactly matches `package.json`, for example `v0.1.0`. The release workflow reruns the full verification gate, compiles native macOS binaries (`manas-darwin-arm64` and `manas-darwin-x64`), applies an ad-hoc signature, and publishes both with a `SHA256SUMS` checksum manifest and GitHub build-provenance attestations. Release binaries are not signed with an Apple Developer ID or notarized by Apple.
+Releases are created by pushing a version tag that exactly matches `package.json`, for example `v0.1.1`. The release workflow reruns the full verification gate, compiles native macOS binaries (`manas-darwin-arm64` and `manas-darwin-x64`), applies an ad-hoc signature, and publishes both with a `SHA256SUMS` checksum manifest and GitHub build-provenance attestations. Release binaries are not signed with an Apple Developer ID or notarized by Apple.
 
 To prepare the same artifacts locally:
 
 ```sh
-MANAS_RELEASE_TAG=v0.1.0 bun run build:release
+MANAS_RELEASE_TAG=v0.1.1 bun run build:release
 (cd dist && shasum -a 256 -c SHA256SUMS)
 ```
 

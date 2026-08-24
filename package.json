@@ -1,6 +1,6 @@
 {
   "name": "manas",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first, Git-backed knowledge system for syncing, indexing, and searching AI conversations.",
   "private": true,
   "license": "MIT",

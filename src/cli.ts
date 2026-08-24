@@ -56,6 +56,8 @@ import { detectSchemaPack } from "./brain/schema";
 import { SqlTenantDirectory } from "./brain/tenancy";
 import { setupManas, setupJsonDocument } from "./setup";
 
+import { parseGlobalArguments } from "@manas/global-options";
+
 const LOCAL_PROVIDERS: Provider[] = [
 	"claude_code",
 	"codex",
@@ -120,7 +122,10 @@ async function executeCatalogCommand(command: string, args: string[]): Promise<u
 }
 
 function usage(): string {
-	return `manas
+	return `manas [--config <path>]
+
+Configuration precedence:
+  --config <path> → MANAS_CONFIG_FILE → home .config/manas/config.json → built-in defaults
 
 Commands:
   setup [--archive <path>] [--config <path>] [--yes] [--no-schedule] [--detect-only|--preview|--repair] [--retire-legacy] [--json]
@@ -409,15 +414,16 @@ async function remoteBrainOperation(subcommand: string | undefined, args: string
 	throw new Error("remote brain mode supports shared page, schema, status, history, list, and export operations");
 }
 
+let invokedCommand: string | undefined;
+
 async function main(): Promise<void> {
-	const args = process.argv.slice(2);
+	const { args, configPath } = parseGlobalArguments(process.argv.slice(2));
 	const command = args[0];
+	invokedCommand = command;
 	if (command === "--version" || command === "version") {
 		console.log(MANAS_VERSION);
 		return;
 	}
-	const configPath = option(args, "--config");
-	const config = await loadConfig({ ...(configPath && command !== "migrate-chat-history-sync" && command !== "setup" ? { filePath: configPath } : {}) });
 	if (!command || command === "help" || command === "--help") {
 		success("help", { usage: usage() });
 		return;
@@ -460,6 +466,14 @@ async function main(): Promise<void> {
 		console.log(JSON.stringify(setup.setupJsonDocument(result)));
 		return;
 	}
+	if (command === "migrate-chat-history-sync") {
+		requireNoArguments(command, args.slice(1));
+		if (!configPath) throw new Error("migrate-chat-history-sync requires --config <path>");
+		const migration = { preflightChatHistorySyncMigration };
+		success(command, await migration.preflightChatHistorySyncMigration(configPath));
+		return;
+	}
+	const config = await loadConfig({ ...(configPath ? { filePath: configPath } : {}) });
 	const legacyJobsCommand = command === "jobs" && !CATALOG_COMMANDS.jobs?.[args[1] ?? ""];
 	if (command === "operation" || (CATALOG_COMMANDS[command] && !legacyJobsCommand)) {
 		rejectUnknownFlags(args.slice(1), ["--input", "--repo", "--store", "--tenant", "--brain", "--scope", "--mcp-url", "--mcp-token"]);
@@ -742,7 +756,7 @@ async function main(): Promise<void> {
 		throw new Error("usage: brain init|migrate|verify|doctor|repair|history|revert|status|schema|access|index|embed|search|related|sources-list|sources-sync|import|extract|export|list|get|put|move|delete|restore|purge");
 	}
 	if (command === "sync") {
-		rejectUnknownFlags(args.slice(1), ["--provider", "--dry-run", "--config", "--scheduled"]);
+		rejectUnknownFlags(args.slice(1), ["--provider", "--dry-run", "--scheduled"]);
 		const scheduled = args.includes("--scheduled");
 		if (scheduled && !isCompiledExecutable(Bun.main))
 			throw new Error("scheduled sync requires an installed release binary");
@@ -806,7 +820,7 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "verify") {
-		rejectUnknownFlags(args.slice(1), ["--config"]);
+		requireNoArguments(command, args.slice(1));
 		const result = await verifyArchive(config.archiveRoot);
 		const scan = await scanArchive(config.archiveRoot);
 		const local = await discoverLocalSources();
@@ -854,19 +868,12 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "install-launch-agent") {
-		rejectUnknownFlags(args.slice(1), ["--config"]);
+		requireNoArguments(command, args.slice(1));
 		if (!isCompiledExecutable(Bun.main))
 			throw new Error("scheduling requires an installed release binary; source execution supports --no-schedule only");
 		if (!configPath) throw new Error("install-launch-agent requires --config <path>");
 		const path = await installLaunchAgent(config, { installedBinary: process.execPath, configPath });
 		success(command, { installed: true, path });
-		return;
-	}
-	if (command === "migrate-chat-history-sync") {
-		rejectUnknownFlags(args.slice(1), ["--config"]);
-		if (!configPath) throw new Error("migrate-chat-history-sync requires --config <path>");
-		const migration = { preflightChatHistorySyncMigration };
-		success(command, await migration.preflightChatHistorySyncMigration(configPath));
 		return;
 	}
 	if (command === "migrate-identifiers") {
@@ -877,7 +884,7 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "status" || command === "sync-status") {
-		rejectUnknownFlags(args.slice(1), ["--config"]);
+		requireNoArguments(command, args.slice(1));
 		success(command, await statusService(config));
 		return;
 	}
@@ -1081,6 +1088,6 @@ async function main(): Promise<void> {
 try {
 	await main();
 } catch (error) {
-	if (process.argv[2] !== "serve") failure(process.argv[2], error);
-	if (process.argv[2] !== "setup") process.exitCode = 1;
+	if (invokedCommand !== "serve") failure(invokedCommand, error);
+	if (invokedCommand !== "setup") process.exitCode = 1;
 }

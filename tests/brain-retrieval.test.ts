@@ -90,7 +90,9 @@ describe("brain retrieval", () => {
 			},
 		};
 		const original = globalThis.fetch;
-		globalThis.fetch = (async (_input, init) => {
+		const requests: string[] = [];
+		globalThis.fetch = (async (input, init) => {
+			requests.push(String(input));
 			const body = JSON.parse(String(init?.body)) as { input: string[] };
 			return new Response(JSON.stringify({
 				data: body.input.map((text) => ({ embedding: text.toLowerCase().includes("rollback") ? [1, 0] : [0, 1] })),
@@ -104,6 +106,36 @@ describe("brain retrieval", () => {
 			expect(outcome.results[0]).toMatchObject({ manasId: "two", path: "claude/two.md" });
 			const health = await brainHealth(config);
 			expect(health).toMatchObject({ credential: "local", semantic: "ready", readiness: { semantic: "ready" } });
+			expect(requests.length).toBeGreaterThan(0);
+			expect(requests.every((request) => request.includes("127.0.0.1"))).toBe(true);
+			expect(requests.some((request) => request.includes("zeroentropy"))).toBe(false);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test("rejects dimension mismatches and malformed local embedding responses", async () => {
+		const original = globalThis.fetch;
+		try {
+			for (const response of [
+				{ data: [{ embedding: [1] }, { embedding: [1] }] },
+				{ malformed: true },
+			]) {
+				const config = await fixture();
+				config.providers = {
+					embedding: {
+						endpoint: "http://127.0.0.1:11434/v1/embeddings",
+						model: "archive-local",
+						privacy: "local",
+						dimensions: 2,
+					},
+				};
+				globalThis.fetch = (async () => Response.json(response)) as unknown as typeof fetch;
+				const indexed = await indexArchive(config);
+				expect(indexed.localStatus).toBe("failed");
+				expect(indexed.remoteStatus).toBe("disabled");
+				expect(indexed.deferred.join(" ")).toContain("local embedding indexing failed");
+			}
 		} finally {
 			globalThis.fetch = original;
 		}

@@ -401,6 +401,7 @@ function assertLoadedConfig(config: Config): void {
 
 export interface LoadConfigOptions {
 	filePath?: string;
+	defaultFilePath?: string;
 	environment?: Environment;
 	explicit?: ConfigOverride;
 }
@@ -414,10 +415,35 @@ export type ConfigOverride = {
 	auth?: AuthConfig;
 };
 
+export function defaultConfigFilePath(home = homedir()): string {
+	return resolve(home, ".config", "manas", "config.json");
+}
+
+function isMissingFile(error: unknown): boolean {
+	return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+export async function resolveConfigFilePath(options: Pick<LoadConfigOptions, "filePath" | "defaultFilePath" | "environment"> = {}): Promise<string | undefined> {
+	const environment = options.environment ?? process.env;
+	if (options.filePath !== undefined) {
+		if (!options.filePath.trim()) throw new Error("configuration file path must not be empty");
+		return resolve(options.filePath);
+	}
+	if (environment.MANAS_CONFIG_FILE !== undefined && environment.MANAS_CONFIG_FILE.trim()) return resolve(environment.MANAS_CONFIG_FILE);
+	const candidate = resolve(options.defaultFilePath ?? defaultConfigFilePath());
+	try {
+		await readFile(candidate, "utf8");
+		return candidate;
+	} catch (error) {
+		if (isMissingFile(error)) return undefined;
+		throw new Error("default configuration file cannot be read");
+	}
+}
+
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<Config> {
 	const environment = options.environment ?? process.env;
 	let file: ConfigOverride = {};
-	const filePath = options.filePath ?? environment.MANAS_CONFIG_FILE;
+	const filePath = await resolveConfigFilePath(options);
 	if (filePath) {
 		let parsed: unknown;
 		try {
