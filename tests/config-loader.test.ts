@@ -5,6 +5,46 @@ import { join } from "node:path";
 import { loadConfig } from "../src/config";
 
 describe("configuration loader", () => {
+	test("discovers the default user config", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
+		try {
+			const path = join(root, "config.json");
+			await writeFile(path, JSON.stringify({ archiveRoot: join(root, "default-archive") }));
+			expect((await loadConfig({ defaultFilePath: path, environment: {} })).archiveRoot).toBe(join(root, "default-archive"));
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("selects explicit, then environment, then default config paths", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
+		try {
+			const explicit = join(root, "explicit.json");
+			const environment = join(root, "environment.json");
+			const fallback = join(root, "default.json");
+			await Promise.all([
+				writeFile(explicit, JSON.stringify({ archiveRoot: join(root, "explicit") })),
+				writeFile(environment, JSON.stringify({ archiveRoot: join(root, "environment") })),
+				writeFile(fallback, JSON.stringify({ archiveRoot: join(root, "default") })),
+			]);
+			expect((await loadConfig({ filePath: explicit, defaultFilePath: fallback, environment: { MANAS_CONFIG_FILE: environment } })).archiveRoot).toBe(join(root, "explicit"));
+			expect((await loadConfig({ defaultFilePath: fallback, environment: { MANAS_CONFIG_FILE: environment } })).archiveRoot).toBe(join(root, "environment"));
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("uses built-in defaults for a missing default file but fails for a missing explicit file", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
+		try {
+			const missing = join(root, "missing.json");
+			expect((await loadConfig({ defaultFilePath: missing, environment: {} })).archiveRoot).toContain("manas");
+			await expect(loadConfig({ filePath: missing, environment: {} })).rejects.toThrow("cannot be read");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("applies defaults, file, environment, then explicit values", async () => {
 		const root = await mkdtemp(join(tmpdir(), "brain-config-"));
 		try {

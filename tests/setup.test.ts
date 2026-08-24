@@ -125,7 +125,7 @@ describe("Manas setup", () => {
 		expect(await child.exited).toBe(2);
 		expect(await new Response(child.stdout).json()).toMatchObject({
 			schema: "manas.setup.v1",
-			version: "0.1.0",
+			version: "0.1.1",
 			exitCode: 2,
 			error: { code: "invalid_request" },
 		});
