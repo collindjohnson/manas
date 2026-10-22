@@ -198,7 +198,19 @@ export function chunkMarkdown(documentId: string, content: string, maximumChars 
 			while (position < section.end && content[position]!.trim() === "") position++;
 		}
 	}
-	return ranges.map((range, ordinal) => {
+ // PostgreSQL text cannot contain NUL. Keep canonical bytes intact and split
+ // projection spans at that delimiter so every indexed byte still cites Git.
+ const searchableRanges = ranges.flatMap((range) => {
+  const spans: Array<{ start: number; end: number }> = [];
+  let start = range.start;
+  for (let at = content.indexOf("\0", start); at >= 0 && at < range.end; at = content.indexOf("\0", start)) {
+   if (at > start && content.slice(start, at).trim()) spans.push({ start, end: at });
+   start = at + 1;
+  }
+  if (start < range.end && content.slice(start, range.end).trim()) spans.push({ start, end: range.end });
+  return spans;
+ });
+ return searchableRanges.map((range, ordinal) => {
 		const text = content.slice(range.start, range.end);
 		const textHash = digest(text);
 		return { id: `${documentId}:${textHash}:${range.start}:${range.end}`, ordinal, text, startOffset: range.start, endOffset: range.end, textHash };

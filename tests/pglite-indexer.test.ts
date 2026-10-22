@@ -19,6 +19,32 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("PGLite brain indexing", () => {
+ test("indexes NUL-containing transcripts without changing Git bytes or citation offsets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "brain-nul-projection-")); roots.push(root);
+  const brain = new BrainRepository(join(root, "brain")); await brain.initialize();
+  const content = "Juniper belongs to Maya.\0\0Unicode 🧠 Zephyr belongs to Omar.\0";
+  const page = await brain.putPage("notes/transcript.md", content);
+  const store = await openPgliteBrainStore();
+  try {
+   const chunks = chunkMarkdown(page.id, content);
+   expect(chunks).toHaveLength(2);
+   for (const chunk of chunks) {
+    expect(chunk.text).not.toContain("\0");
+    expect(content.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+   }
+   expect(chunkMarkdown(page.id, "\0\0")).toEqual([]);
+   await indexBrainRepository(store, brain);
+   const snapshot = await brain.snapshot();
+   expect((await brain.readPage(snapshot, page.id)).content).toBe(content);
+   for (const query of ["Juniper", "Zephyr"]) {
+    const results = await searchVerifiedHybridBrainRepository(store, brain, query, { brainId: snapshot.brainId });
+    expect(results).toHaveLength(1);
+    const citation = results[0].citation;
+    expect(content.slice(citation.startOffset, citation.endOffset)).not.toContain("\0");
+   }
+  } finally { await store.close(); }
+ });
+
  test("concurrent worker indexing and catalog catch-up share one projection build", async () => {
   const root = await mkdtemp(join(tmpdir(), "brain-projection-race-"));
   roots.push(root);
