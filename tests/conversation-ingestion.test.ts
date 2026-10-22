@@ -175,3 +175,28 @@ test("canonical sync shares the live service owner and returns searchable verifi
   expect(await service.engine.store!.query("SELECT status FROM brain_ingestion_runs")).toMatchObject([{ status: "complete" }]);
  } finally { await service.close(); }
 }, 15000);
+
+test("legacy identity lookup reuses unchanged revisions and rechecks changed duplicate identities", async () => {
+ const dependencies = await fixture();
+ const repository = dependencies.repository;
+ try {
+  const legacy = renderNewDocument(conversation);
+  const page = await repository.putPage("archive/old.md", legacy.content, undefined, { type: "legacy-archive", externalId: "old" });
+  const read = repository.readPage.bind(repository);
+  let legacyReads = 0;
+  repository.readPage = async (snapshot, id) => { if (id === page.id) legacyReads++; return read(snapshot, id); };
+  const incoming = { ...conversation, sourceId: "new-session" };
+  await ingestConversation(dependencies, owner, { conversation: incoming, dryRun: true });
+  expect(legacyReads).toBe(1);
+  await repository.putPage("notes/unrelated.md", "Unrelated update");
+  await ingestConversation(dependencies, owner, { conversation: incoming, dryRun: true });
+  expect(legacyReads).toBe(1);
+  const changed = renderNewDocument(incoming);
+  await repository.putPage(page.path, changed.content, page.revision, page.source);
+  const matched = await ingestConversation(dependencies, owner, { conversation: incoming, dryRun: true });
+  expect(matched.documentId).toBe(page.id);
+  expect(legacyReads).toBe(3);
+  await repository.putPage("archive/duplicate.md", changed.content, undefined, { type: "legacy-archive", externalId: "duplicate" });
+  await expect(ingestConversation(dependencies, owner, { conversation: incoming, dryRun: true })).rejects.toMatchObject({ code: "conversation_identity_conflict" });
+ } finally { await dependencies.store.close(); }
+});

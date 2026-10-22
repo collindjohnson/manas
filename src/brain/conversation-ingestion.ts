@@ -11,6 +11,42 @@ const start = "<!-- manas:conversation:start -->";
 const end = "<!-- manas:conversation:end -->";
 const sourceType = "manas-conversation";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+type LegacyIdentity = { contentHash: string; provider?: string; sourceId?: string };
+const legacyIdentityCaches = new WeakMap<BrainRepository, Map<string, LegacyIdentity>>();
+const legacyIdentityBuilds = new WeakMap<BrainRepository, Promise<void>>();
+async function legacyIdentities(repository: BrainRepository, snapshot: Awaited<ReturnType<BrainRepository["snapshot"]>>, signal?: AbortSignal): Promise<Map<string, LegacyIdentity>> {
+ const previous = legacyIdentityBuilds.get(repository) ?? Promise.resolve();
+ let release!: () => void;
+ const gate = new Promise<void>((resolve) => { release = resolve; });
+ const pending = previous.then(() => gate);
+ legacyIdentityBuilds.set(repository, pending);
+ await previous;
+ try {
+  signal?.throwIfAborted();
+  let cache = legacyIdentityCaches.get(repository);
+  if (!cache) { cache = new Map(); legacyIdentityCaches.set(repository, cache); }
+  const entries = snapshot.pages.filter((page) => page.source?.type === "legacy-archive");
+  const present = new Set(entries.map((page) => page.id));
+  for (const id of cache.keys()) if (!present.has(id)) cache.delete(id);
+  const missing = entries.filter((page) => cache!.get(page.id)?.contentHash !== page.contentHash);
+  let next = 0;
+  let failed: unknown;
+  await Promise.all(Array.from({ length: Math.min(8, missing.length) }, async () => {
+   while (next < missing.length && !failed) {
+    const page = missing[next++]!;
+    try {
+     signal?.throwIfAborted();
+     const parsed = parseFrontmatter((await repository.readPage(snapshot, page.id)).content);
+     signal?.throwIfAborted();
+     cache!.set(page.id, { contentHash: page.contentHash, provider: typeof parsed?.values.provider === "string" ? parsed.values.provider : undefined, sourceId: typeof parsed?.values.source_id === "string" ? parsed.values.source_id : undefined });
+    } catch (error) { failed = error; }
+   }
+  }));
+  if (failed) throw failed;
+  return new Map(entries.map((page) => [page.id, cache!.get(page.id)!]));
+ } finally { release(); if (legacyIdentityBuilds.get(repository) === pending) legacyIdentityBuilds.delete(repository); }
+}
+
 function failure(code: string, message: string, suggestedFix: string, retryable = false): Error {
  return Object.assign(new Error(message), { code, retryable, suggestedFix });
 }
@@ -47,12 +83,14 @@ async function ingestConversationAttempt(dependencies: { repository: BrainReposi
  const runId = uuidv5("conversation-ingestion:" + snapshot.brainId + ":" + sourceId + ":" + inputHash);
  const rows = await store.query<{ status: string; checkpoint: Intent & { result?: ConversationIngestionResult } }>("SELECT status, checkpoint FROM brain_ingestion_runs WHERE id = $1 AND tenant_id = $2 AND brain_id = $3", [runId, "local", snapshot.brainId]);
  if (rows[0]?.status === "complete" && rows[0].checkpoint.result) return { ...rows[0].checkpoint.result, replayed: true };
+ const identities = await legacyIdentities(repository, snapshot, context.signal);
+ context.signal?.throwIfAborted();
  const candidates = [];
  for (const entry of snapshot.pages) {
   if (entry.source?.type === sourceType && entry.source.externalId === sourceId || entry.id === stableId) candidates.push(entry);
   else if (entry.source?.type === "legacy-archive") {
-   const parsed = parseFrontmatter((await repository.readPage(snapshot, entry.id)).content);
-   if (parsed?.values.provider === conversation.provider && parsed.values.source_id === conversation.sourceId) candidates.push(entry);
+   const identity = identities.get(entry.id);
+   if (identity?.provider === conversation.provider && identity.sourceId === conversation.sourceId) candidates.push(entry);
   }
  }
  if (candidates.length > 1) throw failure("conversation_identity_conflict", "Multiple canonical records identify this conversation.", "Review duplicate IDs before syncing.");
