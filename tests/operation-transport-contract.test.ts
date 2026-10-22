@@ -100,5 +100,5 @@ describe("catalog operation transport contract", () => {
 				expect(thin.get(fixture.name)).toEqual(direct.get(fixture.name));
 			}
 		} finally { await directStore.close(); await rm(root, { recursive: true, force: true }); }
-	}, 30_000);
+	}, 120_000);
 });

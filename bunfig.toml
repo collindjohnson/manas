@@ -1,0 +1,4 @@
+[test]
+# Git/PGLite integration fixtures need more than the 5s default on hosted CI.
+# Production request deadlines and explicit short cancellation tests stay unchanged.
+timeout = 30000

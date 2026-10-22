@@ -19,6 +19,20 @@ type Repository = { snapshot(ref?: string): Promise<Snapshot>; readPage(snapshot
 
 const projectionRefreshes = new WeakMap<Store, Map<string, Promise<void>>>();
 
+// A service worker and catalog request can project through different entry points.
+// Serialize the entire build, including its snapshot and run reservation, per store.
+const projectionWrites = new WeakMap<Store, Promise<void>>();
+async function withProjectionWrite<T>(store: Store, action: () => Promise<T>): Promise<T> {
+ const previous = projectionWrites.get(store) ?? Promise.resolve();
+ let release!: () => void;
+ const gate = new Promise<void>((resolve) => { release = resolve; });
+ const pending = previous.then(() => gate);
+ projectionWrites.set(store, pending);
+ await previous;
+ try { return await action(); }
+ finally { release(); if (projectionWrites.get(store) === pending) projectionWrites.delete(store); }
+}
+
 // Concurrent catalog readers share one catch-up from canonical Git.
 export async function ensureCurrentBrainProjection(store: Store, repository: Repository): Promise<void> {
  const snapshot = await repository.snapshot();
@@ -192,6 +206,10 @@ export function chunkMarkdown(documentId: string, content: string, maximumChars 
 }
 
 export async function indexBrainRepository(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number }> {
+ return withProjectionWrite(store, () => indexBrainRepositoryUnlocked(store, repository));
+}
+
+async function indexBrainRepositoryUnlocked(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number }> {
 	const snapshot = projectionSnapshot(await repository.snapshot());
 	const tenantId = snapshot.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(snapshot);
@@ -244,6 +262,10 @@ export async function indexBrainRepository(store: Store, repository: Repository)
 }
 
 export async function indexBrainRepositoryIsolated(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string }> {
+ return withProjectionWrite(store, () => indexBrainRepositoryIsolatedUnlocked(store, repository));
+}
+
+async function indexBrainRepositoryIsolatedUnlocked(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string }> {
 	const snapshot = projectionSnapshot(await repository.snapshot());
 	const tenantId = snapshot.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(snapshot);
@@ -289,13 +311,17 @@ export async function indexBrainRepositoryIsolated(store: Store, repository: Rep
 }
 
 export async function indexBrainRepositoryIncremental(store: Store, repository: Repository, options: { fromCommit?: string } = {}): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string; delta?: ProjectionDelta }> {
+ return withProjectionWrite(store, () => indexBrainRepositoryIncrementalUnlocked(store, repository, options));
+}
+
+async function indexBrainRepositoryIncrementalUnlocked(store: Store, repository: Repository, options: { fromCommit?: string } = {}): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string; delta?: ProjectionDelta }> {
 	const target = projectionSnapshot(await repository.snapshot());
 	const tenantId = target.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(target);
 	const active = await store.query<{ git_commit: string; run_id: string }>("SELECT git_commit, run_id FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2", [tenantId, target.brainId]);
 	const fromCommit = options.fromCommit ?? active[0]?.git_commit;
 	if (!fromCommit) {
-		const result = await indexBrainRepositoryIsolated(store, repository);
+		const result = await indexBrainRepositoryIsolatedUnlocked(store, repository);
 		return result;
 	}
 	if (active[0]?.git_commit !== fromCommit) throw new Error("incremental projection base is stale");
