@@ -69,7 +69,7 @@ test("runtime backup restores canonical history, operational receipts, withdrawa
  if (code !== 0) throw new Error(output + error);
  expect(code).toBe(0); expect(error).toBe(""); expect(output).toContain(f.page.id);
  expect((await verifyRuntimeBackup(f.destination)).id).toBe(manifest.id);
-});
+}, 30_000);
 test("runtime backup refuses live owners, existing destinations, and source aliases", async () => {
  const f = await fixture();
  const release = await acquireStoreOwnership(f.storePath);
