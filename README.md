@@ -31,16 +31,64 @@ bun run src/cli.ts brain search --repo <knowledge-repository> --store <local-pgl
 
 The `brain` commands create and maintain Markdown pages in a separate Git repository. Every mutation is revision- and commit-aware, deletion is recoverable, and indexing reads an immutable Git snapshot. Manas also imports local exports from supported AI tools and can synchronize local Markdown and text folders.
 
+## Canonical personal brain
+
+For the shared runtime, create a configuration outside the brain. For example:
+
+```json
+{
+  "stateRoot": "/absolute/manas-state",
+  "archiveRoot": "/absolute/retained-archive",
+  "providers": {
+    "generation": {
+      "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+      "model": "qwen3.8:27b",
+      "privacy": "local"
+    }
+  }
+}
+```
+
+Replace the absolute paths and select an installed local model, or omit
+`providers` to start with lexical retrieval. Initialize a new brain and start the
+foreground service:
+
+```sh
+manas --config /absolute/manas.json brain init --repo /absolute/brain
+manas --config /absolute/manas.json service start --repo /absolute/brain
+```
+
+From another terminal:
+
+```sh
+manas --config /absolute/manas.json remember --input '{"text":"Juniper owner is Maya.","provenance":{"sourceType":"user"},"idempotencyKey":"juniper-owner"}'
+manas --config /absolute/manas.json recall --input '{"query":"Juniper"}'
+manas --config /absolute/manas.json agents preview codex
+manas --config /absolute/manas.json ui open
+```
+
+CLI, MCP, hooks and background jobs share this service, its authorization and
+configured providers. The service exclusively owns PGLite; Git remains canonical.
+Operational state stays outside the brain. Install and verify Codex or Claude
+Code with the [agent integration guide](docs/agent-integration.md), including
+explicit Codex hook trust and opt-in capture. Use the
+[macOS service guide](docs/macos-service.md) for persistent startup.
+
+For an existing archive, follow the [migration and cutover flow](docs/runbooks/operator.md#archive-migration-and-canonical-selection)
+instead of replacing it: backup, preview, resumable copy, shadow retrieval,
+explicit activation, and retained rollback receipts. Existing sync adapters and
+consumer export imports remain available.
+
 ## Local semantic search with Ollama
 
 Run an OpenAI-compatible embedding endpoint locally, then index embeddings into the local PGLite store:
 
 ```sh
 ollama pull nomic-embed-text
-bun run src/cli.ts brain embed --store <local-pglite-directory> --embedding-endpoint http://127.0.0.1:11434/v1/embeddings --embedding-model nomic-embed-text --embedding-dimensions 768
+bun run src/cli.ts brain embed --repo <knowledge-repository> --store <local-pglite-directory> --embedding-endpoint http://127.0.0.1:11434/v1/embeddings --embedding-model nomic-embed-text --embedding-dimensions 768
 ```
 
-Use the same endpoint, model, and dimensions for semantic retrieval. Vectors stay in local PGLite; Markdown in the knowledge repository is unchanged.
+Use the same endpoint, model, and dimensions for semantic retrieval. You can instead configure `providers.embedding` once and run `brain embed` without model flags. When the shared service is running, model flags must match its configuration. Vectors stay in local PGLite; Markdown in the knowledge repository is unchanged.
 
 To use the same local provider for the default archived-chat index and MCP `search` tool, put it in the configuration written by `manas setup`. Installed commands automatically load the setup-generated user configuration:
 
@@ -49,7 +97,11 @@ manas index
 manas search "what did we decide?" --semantic-only
 ```
 
-Configuration-file selection follows `--config`, then `MANAS_CONFIG_FILE`, then the setup-generated `.config/manas/config.json` file in your home directory, and finally built-in defaults. `--config` is global and may appear before or after the command. When a local embedding provider is configured, legacy archive indexing and semantic retrieval use it and do not contact ZeroEntropy. Without one, the existing ZeroEntropy path remains the fallback. `manas serve` uses the same configuration for MCP search.
+Configuration-file selection follows `--config`, then `MANAS_CONFIG_FILE`, then the setup-generated `.config/manas/config.json` file in your home directory, and finally built-in defaults. `--config` is global and may appear before or after the command. Legacy archive indexing and semantic retrieval use the configured local embedding provider. Without a local model, lexical retrieval remains available; semantic-only retrieval reports missing local configuration. Retained ZeroEntropy settings do not activate a hosted fallback. `manas serve` uses the same configuration for MCP search.
+
+`embeddinggemma-2` uses separate query and document retrieval prefixes, recorded in the embedding fingerprint. After switching models, run `manas index` to generate the replacement vectors; previous model vectors remain separate. Archive search uses shared project and repository relationships only to break retrieval-score ties, so dense clusters of approval logs cannot override stronger query matches.
+
+Normal archive searches prefer conversations over machine-generated approval transcripts and injected context records. Queries that explicitly ask about approvals, permissions, authorization, or the injected context use the full relevance ranking. `--explain` includes `sourcePriority` so this preference is visible.
 
 ## Commands
 
@@ -99,7 +151,17 @@ All product environment variables use the `MANAS_` prefix. Set `MANAS_STATE` to 
 
 `serve` starts a local MCP server. For loopback HTTP MCP, set a non-secret local token with `MANAS_MCP_TOKEN` and use `MANAS_MCP_SCOPES` to restrict access. Do not put credentials or local state inside the repository.
 
-Manas can optionally use ZeroEntropy for managed semantic retrieval. That sends bounded transcript chunks to the configured service. Local embeddings are the privacy-preserving path for both PGLite and the legacy archive projection; `health` reports the configured local model separately and only checks ZeroEntropy when no local embedding provider is configured.
+Manas-managed inference uses configured local models through loopback endpoints.
+Hosted privacy settings and explicit Ollama `:cloud` / `-cloud` model selectors
+are rejected. Provider requests do not follow redirects. The request deadline
+covers the complete response body, and responses are limited to 16 MiB.
+Use a trusted local inference service; a loopback address alone cannot prove what
+an independently configured proxy does internally.
+
+Lexical retrieval works without models. Generation reports an actionable local
+configuration error. Legacy ZeroEntropy configuration and archived data are
+retained but do not trigger retrieval, generation, or health requests to that
+service. Command-based generation is not an automatic fallback.
 
 ## Development
 
@@ -166,3 +228,30 @@ If macOS still blocks a checksum-verified release after quarantine is removed, i
 ## License
 
 [MIT](LICENSE) © 2026 Collin Johnson.
+
+Maintained questions, answer freshness, and revision-bound ratings are documented in
+[Maintained answers and feedback](docs/maintained-answers.md).
+
+[Entities and relationships](docs/relationships.md) describes cited entity records,
+merge proposals, and bounded relationship queries.
+
+[Google ingestion](docs/google-ingestion.md) documents read-only OAuth setup,
+Keychain credentials, account and boundary selection, durable cursors and recurring ingestion.
+
+See [macOS canonical service](docs/macos-service.md) for persistent runtime installation, startup recovery, status, and ownership-aware removal.
+
+See [backup and restore](docs/backup-restore.md) for consistent offline snapshots and a fresh-install recovery flow.
+
+See [entity identity review](docs/entity-review.md) for owner merge, separation, rejection, and interrupted-review recovery.
+
+See [canonical session synchronization](docs/canonical-sync.md) for sync/import routing after cutover, stable archive identities, resumable receipts, and user-edit preservation.
+
+See [durable catalog execution](docs/agent-execution.md) for queued tool plans, persisted step results, cancellation, budgets, and opt-in managed graph writes.
+
+Canonical maintenance scans and review proposals: [maintenance guide](docs/maintenance.md).
+
+See [meetings, commitments, and reminders](docs/meeting-preparation.md) and the [owner browser UI](docs/owner-ui.md) for cited preparation, durable local delivery, and same-origin administration.
+
+Retrieval regression checks run with `bun run evaluation:check`. They retain the original baseline and independently gate 29 development and 29 held-out lifecycle queries, including withdrawal/rebuild suppression, exact citations, permission changes, and bounded relationship chains. See [evaluation methodology and baseline provenance](docs/retrieval-evaluation.md).
+
+Optional selected-device MCP access is documented in [Device access](docs/device-access.md), including preview, ownership-aware removal, explicit Funnel exposure, and recovery.

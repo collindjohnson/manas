@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T02:14:51.762Z",
+  "agent": "claude-code",
+  "nativeVersion": "2.1.220 (Claude Code)",
+  "isolated": true,
+  "persistentConfigurationChanged": false,
+  "inference": {
+    "mode": "local-ollama",
+    "model": "qwen3.8:27b",
+    "fallback": false
+  },
+  "checks": [
+    {
+      "name": "native-stop-background-capture",
+      "passed": true,
+      "queued": true,
+      "stableNativeIdentity": true,
+      "memories": 1,
+      "latencyMs": 29494
+    },
+    {
+      "name": "redelivered-stop-deduplicates-native-transcript",
+      "passed": true,
+      "memories": 1
+    },
+    {
+      "name": "native-installed-verification-command",
+      "passed": true,
+      "trustBypass": false
+    }
+  ],
+  "passed": true,
+  "limitations": "Real native Stop and transcript capture using a disposable CLAUDE_CONFIG_DIR and local model. Duplicate-delivery check replays Stop against that actual transcript. Does not verify subscription authentication or visible desktop UI."
+}

@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, extname, join, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
+import type { SourceCheckpoint } from "./types";
 
 const acceptedExtensions = new Set([".md", ".markdown", ".txt"]);
 
@@ -18,16 +19,31 @@ function suggestedPath(path: string): string {
 }
 
 export class FilesystemSourceAdapter {
+	private completedCheckpoint: SourceCheckpoint = {};
 	constructor(readonly root: string, readonly id = "filesystem") {}
 
 	describe() {
 		return { id: this.id, version: "1", kind: "filesystem", trusted: true };
 	}
 
-	async *scan(checkpoint?: { updatedAt?: string }) {
-		for (const document of await this.list())
-			if (!checkpoint?.updatedAt || !document.updatedAt || document.updatedAt > checkpoint.updatedAt) yield document;
+	async *scan(checkpoint?: SourceCheckpoint) {
+		let previous: Record<string, string> = {};
+		if (checkpoint?.cursor) {
+			try {
+				const parsed = JSON.parse(checkpoint.cursor);
+				if (parsed.version === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) previous = parsed.items;
+			} catch { /* Legacy timestamps and unknown cursors require full reconciliation. */ }
+		}
+		const items: Record<string, string> = Object.create(null);
+		for (const document of await this.list()) {
+			const fingerprint = createHash("sha256").update(JSON.stringify({ contentHash: document.contentHash, path: document.suggestedPath, updatedAt: document.updatedAt, sourcePath: document.provenance.sourcePath })).digest("hex");
+			items[document.externalId] = fingerprint;
+			if (previous[document.externalId] !== fingerprint) yield document;
+		}
+		this.completedCheckpoint = { updatedAt: new Date().toISOString(), cursor: JSON.stringify({ version: 1, items }) };
 	}
+
+	checkpoint(): SourceCheckpoint { return { ...this.completedCheckpoint }; }
 
 	async list() {
 		const documents: Array<{

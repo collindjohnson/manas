@@ -13,6 +13,7 @@ type ConversationLike = {
 };
 
 export class ConversationSourceAdapter {
+	private completedCheckpoint: SourceCheckpoint = {};
 	constructor(readonly id: string, private readonly load: () => Promise<ConversationLike[]>) {}
 
 	describe(): SourceDescriptor {
@@ -20,11 +21,24 @@ export class ConversationSourceAdapter {
 	}
 
 	async *scan(checkpoint?: SourceCheckpoint) {
-		for (const document of await this.list())
-			if (!checkpoint?.updatedAt || !document.updatedAt || document.updatedAt > checkpoint.updatedAt) yield document;
+		let previous: Record<string, string> = {};
+		if (checkpoint?.cursor) {
+			try {
+				const parsed = JSON.parse(checkpoint.cursor);
+				if (parsed.version === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) previous = parsed.items;
+			} catch { /* Reconcile an unrecognized legacy cursor by scanning all records. */ }
+		}
+		const items: Record<string, string> = Object.create(null);
+		for (const document of await this.list()) {
+			const fingerprint = createHash("sha256").update(JSON.stringify({ contentHash: document.contentHash, externalRevision: document.externalRevision, path: document.suggestedPath, sourcePath: document.provenance.sourcePath, metadata: document.provenance.metadata })).digest("hex");
+			items[document.externalId] = fingerprint;
+			if (previous[document.externalId] !== fingerprint) yield document;
+		}
+		// The synchronization layer persists this only after every yielded write succeeds.
+		this.completedCheckpoint = { updatedAt: new Date().toISOString(), cursor: JSON.stringify({ version: 1, items }) };
 	}
 
-	checkpoint(): SourceCheckpoint { return { updatedAt: new Date().toISOString() }; }
+	checkpoint(): SourceCheckpoint { return { updatedAt: new Date().toISOString(), ...this.completedCheckpoint }; }
 
 	async list() {
 		return (await this.load()).map((conversation) => {

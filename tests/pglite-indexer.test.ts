@@ -189,3 +189,27 @@ describe("PGLite brain indexing", () => {
 		} finally { await store.close(); }
 	});
 });
+
+test("verified retrieval suppresses Git withdrawals and permission changes before projection rebuild", async () => {
+ const root = await mkdtemp(join(tmpdir(), "manas-current-evidence-"));
+ roots.push(root);
+ const brain = new BrainRepository(join(root, "brain"));
+ await brain.initialize();
+ await execFile("git", ["-C", brain.root, "config", "user.name", "Test"]);
+ await execFile("git", ["-C", brain.root, "config", "user.email", "test@example.invalid"]);
+ const page = await brain.putPage("fact.md", "Telescope ownership belongs to Alice.");
+ const store = await openPgliteBrainStore();
+ try {
+  await indexBrainRepository(store, brain);
+  const initial = await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: [] });
+  expect(initial).toHaveLength(1);
+  const restricted = await brain.setPageAccessLabels(page.path, ["private"], page.revision, page.commit);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: [] })).toEqual([]);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: ["private"] })).toHaveLength(1);
+  await brain.deletePage(page.path, restricted.revision, restricted.commit);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope")).toEqual([]);
+  await expect(resolveBrainCitation(store, brain, initial[0]!.citation)).rejects.toThrow("no longer current");
+  await indexBrainRepository(store, brain);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope")).toEqual([]);
+ } finally { await store.close(); }
+});

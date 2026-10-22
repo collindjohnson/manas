@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T00:47:04.948Z",
+  "model": "qwen3.8:27b",
+  "providerFingerprint": "3cbd83918f54cdc77e80ab3d74216bb5bcff2fee708d797c124f3b2b8490bc94",
+  "fixture": "Maya owns Juniper.",
+  "latencyMs": 19701,
+  "status": "complete",
+  "findings": [
+    {
+      "findings": {
+        "spans": [
+          {
+            "end": 18,
+            "start": 0
+          }
+        ],
+        "relationships": [
+          {
+            "span": {
+              "end": 18,
+              "start": 0
+            },
+            "object": {
+              "end": 17,
+              "type": "other",
+              "start": 10
+            },
+            "subject": {
+              "end": 4,
+              "type": "person",
+              "start": 0
+            },
+            "predicate": {
+              "end": 9,
+              "start": 5
+            },
+            "confidence": 0.95
+          }
+        ]
+      },
+      "completed": true
+    }
+  ],
+  "proposals": [
+    {
+      "kind": "fact-extraction",
+      "status": "pending",
+      "freshness": "current",
+      "evidence": [
+        {
+          "text": "Maya owns Juniper.",
+          "startOffset": 0,
+          "endOffset": 18
+        }
+      ]
+    },
+    {
+      "kind": "relationship",
+      "status": "pending",
+      "freshness": "current",
+      "details": {
+        "subject": "Maya",
+        "subjectType": "person",
+        "predicate": "owns",
+        "object": "Juniper",
+        "objectType": "other",
+        "confidence": 0.95
+      },
+      "evidence": [
+        {
+          "text": "Maya owns Juniper.",
+          "startOffset": 0,
+          "endOffset": 18
+        }
+      ]
+    }
+  ],
+  "passed": true,
+  "limitations": "One synthetic note. Production lease, extraction, proposal, and citation validation; not a broad extraction-quality estimate. No owner configuration, archives, or automatic managed writes."
+}

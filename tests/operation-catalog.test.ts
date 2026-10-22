@@ -43,12 +43,12 @@ describe("complete operation catalog", () => {
 		const store = await openPgliteBrainStore();
 		try {
 			const registry = createFullOperationRegistry({ repository: { head: async () => undefined, listPages: async () => [], getSettings: async () => ({ schemaPack: {} }) } as never, store });
-			const scheduled = await registry.execute({ scope: "write", tenantId: "tenant-a", principal: "writer" }, "jobs.schedule", { type: "report", payload: { format: "json" }, intervalSeconds: 60, nextRunAt: "2026-07-27T00:00:00.000Z" });
+			const scheduled = await registry.execute({ scope: "admin", tenantId: "tenant-a", principal: "owner" }, "jobs.schedule", { type: "report", payload: { format: "json" }, intervalSeconds: 60, nextRunAt: "2026-07-27T00:00:00.000Z" });
 			expect(scheduled).toMatchObject({ tenantId: "tenant-a", type: "report", intervalSeconds: 60, enabled: true });
 			expect(await registry.execute({ scope: "read", tenantId: "tenant-a", principal: "reader" }, "jobs.schedules", {})).toMatchObject([{ type: "report", tenantId: "tenant-a" }]);
 			expect(await registry.execute({ scope: "write", tenantId: "tenant-a", brainId: "brain-a", principal: "writer" }, "skills.feedback", { id: "catalog-feedback", skillId: "brain-search", version: "1.0.0", agent: "codex", outcome: "used", confidence: 0.8 })).toMatchObject({ id: "catalog-feedback", tenantId: "tenant-a", brainId: "brain-a" });
 			expect(await registry.execute({ scope: "read", tenantId: "tenant-a", brainId: "brain-a", principal: "reader" }, "skills.feedback.list", {})).toMatchObject([{ id: "catalog-feedback", skillId: "brain-search" }]);
-			await expect(registry.execute({ scope: "write", tenantId: "tenant-a", principal: "writer" }, "jobs.schedule", { type: "report", payload: {}, intervalSeconds: 0 })).rejects.toThrow("below the minimum");
+			await expect(registry.execute({ scope: "admin", tenantId: "tenant-a", principal: "owner" }, "jobs.schedule", { type: "report", payload: {}, intervalSeconds: 0 })).rejects.toThrow("below the minimum");
 		} finally { await store.close(); }
 	});
 
@@ -96,4 +96,34 @@ describe("complete operation catalog", () => {
 			expect(await registry.execute(memberContext, "retrieval.search", { query: "private tenant retrieval" })).toMatchObject({ results: [] });
 		} finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 	});
+});
+
+test("catalog readers refresh new Git records once and enforce current access", async () => {
+ const root = await mkdtemp(join(tmpdir(), "catalog-freshness-"));
+ const repository = new BrainRepository(join(root, "brain"));
+ const store = await openPgliteBrainStore();
+ try {
+  await repository.initialize();
+  await execFile("git", ["-C", repository.root, "config", "user.name", "Test"]);
+  await execFile("git", ["-C", repository.root, "config", "user.email", "test@example.invalid"]);
+  await repository.putPage("seed.md", "Initial record.");
+  await indexBrainRepositoryIsolated(store, repository);
+  const registry = createFullOperationRegistry({ repository, store });
+  const context = { scope: "read" as const, principal: "reader", tenantId: "local", allowedAccessLabels: [] as string[] };
+  await expect(registry.execute({ ...context, scope: "admin" }, "projection.rebuild", {})).rejects.toThrow("owner administration");
+  const page = await repository.putPage("fresh.md", "Quasar launch responsibility belongs to Morgan.");
+  const reads = await Promise.all(Array.from({ length: 4 }, () => registry.execute(context, "retrieval.search", { query: "quasar", options: { mode: "keyword" } }))) as Array<{ results: Array<{ verifiedText: string; citation: { revision: string } }> }>;
+  for (const read of reads) {
+   expect(read.results).toHaveLength(1);
+   expect(read.results[0]!.citation.revision).toBe(page.revision);
+   expect(read.results[0]!.verifiedText).toContain("Morgan");
+  }
+  const runs = await store.query<{ count: number }>("SELECT count(*)::integer AS count FROM brain_projection_runs WHERE git_commit = $1", [page.commit!]);
+  expect(runs[0]!.count).toBe(1);
+  const restricted = await repository.setPageAccessLabels(page.path, ["private"], page.revision, page.commit);
+  expect(await registry.execute(context, "retrieval.search", { query: "quasar", options: { mode: "keyword" } })).toMatchObject({ results: [] });
+  expect(await registry.execute({ ...context, allowedAccessLabels: ["private"] }, "context.deliver", { query: "quasar" })).toMatchObject({ outcome: "delivered" });
+  await repository.deletePage(page.path, restricted.revision, restricted.commit);
+  expect(await registry.execute({ ...context, allowedAccessLabels: ["private"] }, "retrieval.search", { query: "quasar", options: { mode: "keyword" } })).toMatchObject({ results: [] });
+ } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });

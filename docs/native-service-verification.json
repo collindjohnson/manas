@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T01:43:03.714Z",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "isolated": true,
+  "persistentUserConfigurationChanged": false,
+  "checks": [
+    {
+      "name": "launchd-bootstrap-and-health",
+      "passed": true,
+      "latencyMs": 1281
+    },
+    {
+      "name": "crash-restart-and-durable-recall",
+      "passed": true,
+      "latencyMs": 9558
+    },
+    {
+      "name": "owned-uninstall",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "limitations": "Temporarily bootstraps the production label from a disposable plist only when no existing service is loaded. Verifies real launchd startup, crash recovery, durable recall, and removal. Does not exercise logout/login, machine sleep, or visible notification delivery."
+}

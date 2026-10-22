@@ -1,14 +1,43 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+import { BrainRepository } from "./repository";
+import { openPgliteBrainStore } from "./store";
+import { indexBrainRepository, searchVerifiedHybridBrainRepository } from "./pglite-indexer";
+const execFile = promisify(execFileCallback);
 import { buildScorecard, replayEvaluation, type EvaluationCase } from "./advanced";
 
-export interface AdvancedEvaluationFixture extends EvaluationCase { tenantId: string; brainId: string; query: string; citations: string[]; }
-export interface AdvancedEvaluationReport { corpus: string; cases: number; replay: ReturnType<typeof replayEvaluation>; scorecard: ReturnType<typeof buildScorecard>; isolated: boolean; warnings: string[]; }
+export interface AdvancedEvaluationFixture { id: string; query: string; expectedIds: string[]; allowedAccessLabels: string[]; tenantId?: string; }
+export interface AdvancedEvaluationReport {
+	corpus: string;
+	corpusHash: string;
+	cases: number;
+	replay: ReturnType<typeof replayEvaluation>;
+	scorecard: ReturnType<typeof buildScorecard>;
+	metrics: { recallAt10: number; mrr: number; ndcgAt10: number };
+	results: EvaluationCase[];
+	isolated: boolean;
+	warnings: string[];
+}
 export interface DiscoveredFeature { id: string; category: "routing" | "memory" | "code" | "evaluation" | "maintenance"; acceptance: string; }
 
+export const ADVANCED_EVALUATION_DOCUMENTS = [
+	{ id: "owner", text: "Project Juniper owner is Maya. Session recorded the ownership decision.", labels: [] },
+	{ id: "decision", text: "Juniper launch decision date is September 14, 2026.", labels: [] },
+	{ id: "code", text: "The reconcileCheckpoint caller is syncSource in the connector worker.", labels: [] },
+	{ id: "private", text: "Confidential Juniper vault passphrase is heliotrope.", labels: ["private"] },
+	{ id: "noise", text: "Session tool output: build passed, tests passed, waiting for user input.", labels: [] },
+] as const;
 export const ADVANCED_EVALUATION_CORPUS: readonly AdvancedEvaluationFixture[] = [
-	{ id: "longmem-1", tenantId: "tenant-a", brainId: "brain-a", query: "project owner", expectedIds: ["doc-owner"], actualIds: ["doc-owner"], citations: ["doc-owner:chunk-1"] },
-	{ id: "longmem-2", tenantId: "tenant-a", brainId: "brain-a", query: "decision date", expectedIds: ["doc-decision"], actualIds: ["doc-decision", "doc-stale"], citations: ["doc-decision:chunk-1"] },
-	{ id: "code-1", tenantId: "tenant-a", brainId: "brain-a", query: "caller", expectedIds: ["code-definition"], actualIds: ["code-definition"], citations: ["code-definition:chunk-1"] },
-	{ id: "isolation-1", tenantId: "tenant-b", brainId: "brain-b", query: "private", expectedIds: ["doc-private"], actualIds: ["doc-private"], citations: ["doc-private:chunk-1"] },
+	{ id: "cross-session", query: "Juniper owner", expectedIds: ["owner"], allowedAccessLabels: [] },
+	{ id: "temporal", query: "launch decision date", expectedIds: ["decision"], allowedAccessLabels: [] },
+	{ id: "code", query: "reconcileCheckpoint caller", expectedIds: ["code"], allowedAccessLabels: [] },
+	{ id: "authorized", query: "heliotrope", expectedIds: ["private"], allowedAccessLabels: ["private"] },
+	{ id: "visibility-denied", query: "heliotrope", expectedIds: [], allowedAccessLabels: [] },
+	{ id: "tenant-denied", query: "Juniper", expectedIds: [], allowedAccessLabels: ["private"], tenantId: "other" },
 ];
 
 export const ADVANCED_FEATURE_INVENTORY: readonly DiscoveredFeature[] = [
@@ -21,12 +50,46 @@ export const ADVANCED_FEATURE_INVENTORY: readonly DiscoveredFeature[] = [
 	{ id: "self-maintenance", category: "maintenance", acceptance: "bounded proposals require approval" },
 ];
 
-export function runAdvancedEvaluation(fixtures: readonly AdvancedEvaluationFixture[] = ADVANCED_EVALUATION_CORPUS): AdvancedEvaluationReport {
-	if (!fixtures.length || fixtures.some((fixture) => !fixture.tenantId.trim() || !fixture.brainId.trim() || !fixture.query.trim() || fixture.citations.some((citation) => !citation.trim()))) throw new Error("advanced evaluation corpus is invalid");
-	const replay = replayEvaluation(fixtures.map(({ id, expectedIds, actualIds }) => ({ id, expectedIds, actualIds })));
-	const scorecard = buildScorecard("advanced-analysis", [{ id: "recall", value: replay.recall, weight: 2 }, { id: "precision", value: replay.precision, weight: 2 }, { id: "exact", value: replay.exactMatches / fixtures.length, weight: 1 }]);
-	const scopes = new Set(fixtures.map((fixture) => `${fixture.tenantId}:${fixture.brainId}`));
-	return { corpus: "gbrain-v0.42.65.0-synthetic", cases: fixtures.length, replay, scorecard, isolated: scopes.size >= 2, warnings: replay.recall < 1 ? ["corpus contains a deliberate stale-result case"] : [] };
+/** Executes the production verified lexical/hybrid path without calling any inference service. */
+export async function runAdvancedEvaluation(): Promise<AdvancedEvaluationReport> {
+	const root = await mkdtemp(join(tmpdir(), "manas-evaluation-"));
+	let store: Awaited<ReturnType<typeof openPgliteBrainStore>> | undefined;
+	try {
+		const repository = new BrainRepository(join(root, "brain"));
+		await repository.initialize();
+		await execFile("git", ["-C", repository.root, "config", "user.name", "Manas Evaluation"]);
+		await execFile("git", ["-C", repository.root, "config", "user.email", "evaluation@manas.invalid"]);
+		for (const document of ADVANCED_EVALUATION_DOCUMENTS) {
+			const page = await repository.putPage(`notes/${document.id}.md`, document.text);
+			if (document.labels.length) await repository.setPageAccessLabels(page.path, [...document.labels], page.revision, page.commit);
+		}
+		store = await openPgliteBrainStore();
+		await indexBrainRepository(store, repository);
+		const { brainId } = await repository.snapshot();
+		const results: EvaluationCase[] = [];
+		for (const fixture of ADVANCED_EVALUATION_CORPUS) {
+			const hits = await searchVerifiedHybridBrainRepository(store, repository, fixture.query, { brainId, tenantId: fixture.tenantId ?? "local", allowedAccessLabels: fixture.allowedAccessLabels, limit: 10, autocut: false });
+			results.push({ id: fixture.id, expectedIds: [...fixture.expectedIds], actualIds: [...new Set(hits.map((hit) => hit.path.replace(/^notes\//, "").replace(/\.md$/, "")))] });
+		}
+		const replay = replayEvaluation(results);
+		const positive = results.filter((result) => result.expectedIds.length);
+		let recallAt10 = 0, mrr = 0, ndcgAt10 = 0;
+		for (const result of positive) {
+			const relevant = new Set(result.expectedIds);
+			const actual = result.actualIds.slice(0, 10);
+			recallAt10 += actual.filter((id) => relevant.has(id)).length / relevant.size;
+			const first = actual.findIndex((id) => relevant.has(id));
+			mrr += first < 0 ? 0 : 1 / (first + 1);
+			const dcg = actual.reduce((sum, id, index) => sum + (relevant.has(id) ? 1 / Math.log2(index + 2) : 0), 0);
+			const ideal = Array.from({ length: Math.min(10, relevant.size) }, (_, index) => 1 / Math.log2(index + 2)).reduce((sum, value) => sum + value, 0);
+			ndcgAt10 += dcg / ideal;
+		}
+		const metrics = { recallAt10: recallAt10 / positive.length, mrr: mrr / positive.length, ndcgAt10: ndcgAt10 / positive.length };
+		const isolated = results.filter((result) => !result.expectedIds.length).every((result) => !result.actualIds.length);
+		return { corpus: "manas-retrieval-v1", corpusHash: createHash("sha256").update(JSON.stringify({ documents: ADVANCED_EVALUATION_DOCUMENTS, queries: ADVANCED_EVALUATION_CORPUS })).digest("hex"), cases: results.length, replay, metrics, results, isolated, scorecard: buildScorecard("retrieval", Object.entries(metrics).map(([id, value]) => ({ id, value, weight: 1 }))), warnings: isolated ? [] : ["unauthorized retrieval detected"] };
+	} finally {
+		try { await store?.close(); } finally { await rm(root, { recursive: true, force: true }); }
+	}
 }
 
 export function discoverAdvancedFeatures(): DiscoveredFeature[] { return ADVANCED_FEATURE_INVENTORY.map((feature) => ({ ...feature })); }

@@ -221,6 +221,7 @@ export const setActiveEmbeddingModel = embeddingStateModule.setActiveEmbeddingMo
 export const buildAndActivateEmbeddingModel = embeddingStateModule.buildAndActivateEmbeddingModel;
 export const rollbackEmbeddingModel = embeddingStateModule.rollbackEmbeddingModel;
 export const createBrainEngine = engineModule.createBrainEngine;
+export const createBrainProviders = engineModule.createBrainProviders;
 export const createConfiguredBrainEngine = engineModule.createConfiguredBrainEngine;
 export const computeBackoff = queueModule.computeBackoff;
 export const assertPgliteSchedulerOwner = queueModule.assertPgliteSchedulerOwner;
@@ -296,3 +297,72 @@ export type { HttpPullState, HttpPullResult } from "./sources/network";
 export type { PluginDocument, PluginAdapter, SourcePlugin, SourcePluginVerification } from "./sources/plugins";
 export type { AdminAuditReceipt, AdminActionContext, DurableAdminActionReceipt } from "./brain/admin";
 export type { BrainHealth } from "./brain/health";
+
+export { remember, recall, correct, forget, memoryHistory, MemoryOperationError } from "./brain/memory";
+export type { MemoryWriteInput, MemoryCorrectInput, MemoryForgetInput, MemoryReceipt, MemoryState, MemoryProvenance } from "./brain/memory";
+
+export { deliverContext } from "./brain/context-delivery";
+export type { ContextDelivery } from "./brain/context-delivery";
+
+export { stageCaptureTurn, enqueueCaptureTurn, memoryCaptureHandler, CaptureError } from "./brain/memory-capture";
+export type { CaptureTurn, CapturePolicy } from "./brain/memory-capture";
+
+export { enqueueClaudeTranscript, claudeTranscriptHandler } from "./brain/claude-transcript-capture";
+export type { ClaudeTranscriptInput } from "./brain/claude-transcript-capture";
+export { manageAgentMcp, liveClientRegistry, resolveClientGrant, ClientAccessError } from "./agent-mcp";
+export type { AgentMcpOptions } from "./agent-mcp";
+
+export { createAnswer, getAnswer, definePin, readPin, pinStatus, enqueuePinRefresh, pinnedAnswerHandler, answerFeedback, resetAnswerFeedback, AnswerAccessError } from "./brain/maintained-answers";
+
+export { putEntity, putRelationship, resolveEntity, queryRelationships, entityReviews, resolveEntityReview, EntityReviewError } from "./brain/entity-relationships";
+export type { EntityDefinition, RelationshipDefinition } from "./brain/entity-relationships";
+export { verifyEvidence, isPrimaryEvidence, EvidenceError } from "./brain/evidence-contract";
+
+export { GoogleReadClient, GoogleApiError } from "./sources/google-api";
+export { readGooglePage, validateGoogleBoundary, googleBoundaryHash, googleSourceId } from "./sources/google-pages";
+export type { GoogleBoundary, GoogleCursor, GooglePage } from "./sources/google-pages";
+export { syncGooglePage, GoogleSyncError } from "./brain/google-sync";
+
+export { beginGoogleAuthorization, refreshGoogleCredential, validateGoogleCredential } from "./sources/google-oauth";
+export type { GoogleService, GoogleDesktopClient, GoogleCredential } from "./sources/google-oauth";
+
+export { authorizeGoogleAccount } from "./sources/google-authorization";
+export { MacGoogleCredentialStore } from "./sources/google-keychain";
+
+export { createGoogleAccountClient } from "./sources/google-account-client";
+export type { GoogleCredentialAccess } from "./sources/google-account-client";
+
+export { addGoogleSource, googleSourceStatus, enqueueGoogleSync, googleSyncHandler, setGoogleSourceEnabled, scheduleGoogleSource } from "./brain/google-jobs";
+export type { GoogleSyncReceipt } from "./brain/google-sync";
+
+export { connectGoogleAccount } from "./brain/google-setup";
+export type { GoogleBoundarySelection } from "./brain/google-setup";
+
+export { renderServiceLaunchAgent, previewServiceInstallation, previewServiceRemoval, serviceInstallationStatus, installService, uninstallService } from "./service-installation";
+export type { ServiceInstallation, LaunchctlRunner, LaunchctlResult } from "./service-installation";
+
+export { createRuntimeBackup, verifyRuntimeBackup, restoreRuntimeBackup, runtimeBackupOperations, RuntimeBackupError } from "./runtime-backup";
+export type { RuntimeBackupEntry, RuntimeBackupManifest } from "./runtime-backup";
+
+export type { EntityReviewInput } from "./brain/entity-relationships";
+
+export { ingestConversation, type ConversationIngestionResult } from "./brain/conversation-ingestion";
+
+export { startExecution, executionStatus, listExecutions, cancelExecution, catalogExecutionHandler, ExecutionError, EXECUTION_READ_OPERATIONS, EXECUTION_WRITE_OPERATIONS, type ExecutionStep, type ExecutionBudget, type CatalogExecute } from "./brain/catalog-execution";
+
+export { maintenanceScanHandler, maintenanceProposals, dismissMaintenanceProposal, MAINTENANCE_PROPOSAL_SOURCE } from "./brain/maintenance-scan";
+
+export { applyRelationshipProposal, MaintenanceReviewError } from "./brain/maintenance-approval";
+
+export { putOpenLoop, setOpenLoopStatus, getOpenLoop, listOpenLoops, OpenLoopError, OPEN_LOOP_SOURCE, type LoopStatus, type LoopWriteInput } from "./brain/open-loops";
+
+export { prepareMeeting, getMeetingPreparation, MeetingError, MEETING_PREPARATION_SOURCE, type MeetingInput } from "./brain/meeting-preparation";
+
+export { enqueueReminder, listReminders, ReminderError } from "./brain/reminders";
+
+export { DeviceAccessController } from "./device-service";
+export { DeviceInstallation, DeviceAccessError, deviceAccessPaths, type DeviceSettings, type DeviceReceipt, type TailscaleRunner } from "./device-installation";
+export { createDeviceRequestAuthorizer, type DeviceAccessGrant, type TailscaleIdentity } from "./device-access";
+
+export { verifyAgentIntegration, AgentVerificationError, type NativeVerificationRunner, type NativeVerificationResult } from "./agent-verification";
+export type { AgentVerification, VerificationInstallation } from "./agent-verification-state";

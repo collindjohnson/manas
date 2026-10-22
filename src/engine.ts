@@ -1,3 +1,11 @@
+import { randomUUID } from "node:crypto";
+import { createRuntimeJobHandlers } from "./brain/runtime-jobs";
+import { runOneJob } from "./brain/jobs";
+import { indexBrainRepository } from "./brain/pglite-indexer";
+import { assertLocalInferenceConfig } from "./brain/local-inference";
+import { createFullOperationRegistry } from "./brain/operation-catalog";
+import { DurableControlPlane } from "./brain/control-plane";
+import type { OperationRegistry } from "./brain/operation-registry";
 import { createHash } from "node:crypto";
 import { loadConfig, type AuthConfig, type Config, type LoadConfigOptions, type OAuthClientConfig, type ProviderEndpointConfig } from "./config";
 import { OAuthAuthorizationServer, QuotaLedger, SessionManager, type OAuthClient } from "./brain/oauth";
@@ -33,6 +41,7 @@ export interface BrainAuthBundle {
 }
 
 export interface BrainEngine {
+	operations: OperationRegistry;
 	repository: BrainRepository;
 	store?: BrainStore;
 	config: Config;
@@ -59,7 +68,8 @@ function endpointConfig(value: ProviderEndpointConfig | undefined): ProviderEndp
 	return value;
 }
 
-function configuredProviders(config: Config, overrides: Partial<BrainProviderBundle> = {}): BrainProviderBundle {
+export function createBrainProviders(config: Config, overrides: Partial<BrainProviderBundle> = {}): BrainProviderBundle {
+	assertLocalInferenceConfig(config);
 	const settings = config.providers ?? {};
 	const legacy = config.brain;
 	const reranking = settings.reranking ?? (legacy?.rerankerEndpoint && legacy.rerankerModel ? {
@@ -113,13 +123,28 @@ export async function createBrainEngine(options: BrainEngineOptions): Promise<Br
 	if (!options.repositoryRoot.trim()) throw new Error("brain engine repository root is required");
 	if (options.config && options.configLoad) throw new Error("provide either config or configLoad, not both");
 	const config = options.config ?? await loadConfig(options.configLoad);
+	assertLocalInferenceConfig(config);
 	const repository = new BrainRepository(options.repositoryRoot, options.repositoryOptions);
 	await repository.initialize();
 	const store = options.storePath ? await openPgliteBrainStore(options.storePath) : undefined;
 	try {
-		const providers = configuredProviders(config, options.providers);
+		await repository.ensureInitialCommit();
+		if (store && await repository.head()) {
+			const snapshot = await repository.snapshot();
+			const active = await store.query<{ git_commit: string }>("SELECT git_commit FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2", ["local", snapshot.brainId]);
+			if (active[0]?.git_commit !== snapshot.commit) await indexBrainRepository(store, repository);
+		}
+		const providers = createBrainProviders(config, options.providers);
 		const auth = await configuredAuth(config, store, options.auth);
-		return { repository, ...(store ? { store } : {}), config, providers, auth, close: async () => { await store?.close(); } };
+		const workerId = "engine-" + randomUUID();
+		let operations: OperationRegistry;
+		const jobHandlers = store ? createRuntimeJobHandlers({ store, repository, config, providers, workerId, executeCatalog: (context, name, input) => operations.execute(context, name, input) }) : undefined;
+		operations = createFullOperationRegistry({ handlers: { "jobs.run-one": async (context) => {
+			if (context.allowedAccessLabels !== undefined) throw Object.assign(new Error("owner_access_required"), { code: "owner_access_required", retryable: false, suggestedFix: "Use unrestricted owner administration for background work." });
+			if (!store || !jobHandlers) throw new Error("jobs require a configured operational store");
+			return { job: await runOneJob(store, workerId, jobHandlers, { tenantId: context.tenantId ?? "local" }) ?? null };
+		} }, backupConfig: config, stateRoot: config.stateRoot, repository, ...(store ? { store, controlPlane: new DurableControlPlane(store) } : {}), embeddingProvider: providers.embedding, rerankerProvider: providers.reranking, generationProvider: providers.generation, transcriptionProvider: providers.transcription });
+		return { repository, operations, ...(store ? { store } : {}), config, providers, auth, close: async () => { await store?.close(); } };
 	} catch (error) {
 		await store?.close();
 		throw error;

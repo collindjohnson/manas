@@ -1,8 +1,22 @@
 #!/usr/bin/env bun
+import { realpath } from "node:fs/promises";
+import { verifyAgentIntegration } from "./agent-verification";
+import { runAgentHook } from "./agent-hook-runtime";
+import { manageAgentMcp, liveClientRegistry } from "./agent-mcp";
+import { manageAgentHooks } from "./agent-hooks";
+import { executableCommand } from "./executable";
+import { previewAgentInstallation, installAgentSkills, agentInstallationStatus, uninstallAgentSkills, type ManagedAgent } from "./agent-management";
+import { MemoryOperationError } from "./brain/memory";
+import { activateCanonicalArchive, loadCanonicalSelection, rollbackCanonicalArchive, shadowArchiveMigration, type CanonicalSelection } from "./canonical-runtime";
+import { applyArchiveMigration, previewArchiveMigration, readArchiveMigration } from "./archive-migration";
 
 import { importOfficialExport } from "./imports/exports";
-import { loadConfig } from "./config";
+import { loadConfig, type Config } from "./config";
+import { createBrainEngine, createBrainProviders } from "./engine";
+import { callLocalService, LocalServiceError, localServiceRegistry, startLocalService } from "./local-service";
 import { installLaunchAgent } from "./launch-agent";
+import { runtimeBackupOperations } from "./runtime-backup";
+import { installService, previewServiceInstallation, previewServiceRemoval, serviceInstallationStatus, uninstallService } from "./service-installation";
 import { scanArchive } from "./archive";
 import { verifyArchive } from "./report";
 
@@ -32,27 +46,13 @@ import { writeScheduledSyncReceipt } from "@manas/scheduler-receipt";
 import { BrainRepository } from "./brain/repository";
 import { migrateLegacyArchive, preflightChatHistorySyncMigration } from "./migration";
 import { openPgliteBrainStore } from "./brain/store";
-import { indexBrainRepository, relatedBrainPages, rerankProjectedSearchResults, resolveBrainCitation, searchBrainRepository, searchExpandedBrainRepository, searchVerifiedHybridBrainRepository, traverseBrainGraph } from "./brain/pglite-indexer";
-import { FilesystemSourceAdapter } from "./sources/filesystem";
-import { syncSource } from "./sources/sync";
-import * as genericImportModule from "./sources/generic-imports";
-import { captureBrainNote } from "./brain/capture";
-import { OpenAiCompatibleEmbeddingProvider, OpenAiCompatibleRerankerProvider, OpenAiCompatibleStructuredExtractionProvider, OpenAiCompatibleTranscriptionProvider } from "./brain/providers";
-import { indexLocalEmbeddings } from "./brain/local-embeddings";
-import { loadState, saveState } from "./state";
+import { StoreOwnedError } from "./brain/ownership";
 import * as operationRegistryModule from "./brain/operation-registry";
 import * as operationCatalogModule from "./brain/operation-catalog";
 import * as controlPlaneModule from "./brain/control-plane";
 import { serveMcpHttp } from "./mcp/http";
 import { callMcpHttp } from "./mcp/client";
-import { extractLocalFile } from "./sources/extractors";
-import { diagnoseBrain } from "./brain/diagnostics";
-import { authorizePersonalAccessToken, createPersonalAccessToken, identifyPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } from "./brain/access-tokens";
-import { listAuditEvents } from "./brain/audit";
-import { redactAdminEvent } from "./brain/control-plane";
-import { cancelJob, createJobSchedule, enqueueJob, listJobSchedules, listJobs, runOneJob } from "./brain/jobs";
-import { createParityJobHandlers } from "./brain/job-handlers";
-import { detectSchemaPack } from "./brain/schema";
+import { authorizePersonalAccessToken, identifyPersonalAccessToken } from "./brain/access-tokens";
 import { SqlTenantDirectory } from "./brain/tenancy";
 import { setupManas, setupJsonDocument } from "./setup";
 
@@ -67,17 +67,26 @@ const LOCAL_PROVIDERS: Provider[] = [
 ];
 
 
-const brainOperationModule = {
-	executeBrainRepositoryOperation: (repository: unknown, name: string, args: Record<string, unknown>) => operationRegistryModule.createBrainRepositoryOperationRegistry(repository as never).execute({ scope: "admin", principal: "cli" }, name, args),
-};
+let selectedCanonicalRuntime: CanonicalSelection | undefined;
 
 const CATALOG_COMMANDS: Record<string, Record<string, string>> = {
+ reminders: { enqueue: "reminders.enqueue", list: "reminders.list" },
+ meetings: { prepare: "meetings.prepare", get: "meetings.get" },
+ loops: { put: "loops.put", status: "loops.status", get: "loops.get", list: "loops.list" },
+ execution: { start: "execution.start", status: "execution.status", list: "execution.list", cancel: "execution.cancel" },
+ google: { schedule: "google.sources.schedule", connect: "google.accounts.connect", enable: "google.sources.enable", add: "google.sources.add", status: "google.sources.status", sync: "google.sources.sync" },
+ entities: { put: "entities.put", resolve: "entities.resolve", reviews: "entities.reviews", review: "entities.review.resolve" },
+ relationships: { put: "relationships.put", query: "relationships.query" },
+ answers: { get: "answers.get", feedback: "answers.feedback", "feedback-reset": "answers.feedback.reset" },
+ questions: { put: "questions.put", get: "questions.get", list: "questions.list", refresh: "questions.refresh" },
 	models: { diagnose: "models.diagnose", activate: "models.activate" },
 	agents: { start: "agent.start", status: "agent.status", update: "agent.update" },
 	autopilot: { start: "agent.start", status: "agent.status", update: "agent.update" },
-	jobs: { list: "jobs.list", enqueue: "jobs.enqueue", cancel: "jobs.cancel", schedule: "jobs.schedule", schedules: "jobs.schedules" },
+	context: { deliver: "context.deliver" },
+	memory: { remember: "memory.remember", recall: "memory.recall", correct: "memory.correct", forget: "memory.forget", history: "memory.history" },
+	jobs: { "run-one": "jobs.run-one", list: "jobs.list", enqueue: "jobs.enqueue", cancel: "jobs.cancel", schedule: "jobs.schedule", schedules: "jobs.schedules" },
 	dream: { run: "jobs.enqueue", maintenance: "maintenance.propose" },
-	maintenance: { propose: "maintenance.propose" },
+	maintenance: { propose: "maintenance.propose", scan: "maintenance.scan", proposals: "maintenance.proposals", dismiss: "maintenance.dismiss", accept: "maintenance.accept" },
 	sources: { list: "sources.list", enable: "sources.enable" },
 	plugins: { list: "sources.list" },
 	schema: { plan: "schema.upgrade.plan", approve: "schema.upgrade.approve", apply: "schema.upgrade.apply" },
@@ -94,7 +103,36 @@ const CATALOG_COMMANDS: Record<string, Record<string, string>> = {
 	connect: { session: "auth.session.create", revoke: "auth.session.revoke" },
 };
 
-async function executeCatalogCommand(command: string, args: string[]): Promise<unknown> {
+async function executeCatalogCommand(command: string, args: string[], config: Config): Promise<unknown> {
+ const connecting = command === "google" && args[0] === "connect" || command === "operation" && args[0] === "google.accounts.connect";
+ if (!connecting) return executeCatalogCommandWithSignal(command, args, config);
+ const abort = new AbortController(), cancel = () => abort.abort();
+ process.once("SIGINT", cancel); process.once("SIGTERM", cancel);
+ try { return await executeCatalogCommandWithSignal(command, args, config, abort.signal); }
+ finally { process.off("SIGINT", cancel); process.off("SIGTERM", cancel); }
+}
+function legacyBrainProviders(operation: string, args: string[], config: Config): { config: Config; requested: Record<string, unknown> } {
+ if (!["retrieval.search", "projection.embed"].includes(operation)) return { config, requested: {} };
+ const providers = { ...config.providers };
+ const requested: Record<string, unknown> = {};
+ const embeddingEndpoint = option(args, "--embedding-endpoint"), embeddingModel = option(args, "--embedding-model"), rawDimensions = option(args, "--embedding-dimensions");
+ if (embeddingEndpoint !== undefined || embeddingModel !== undefined || rawDimensions !== undefined) {
+  const dimensions = Number(rawDimensions);
+  if (!embeddingEndpoint || !embeddingModel || !Number.isInteger(dimensions) || dimensions < 1) throw new Error("embedding flags require endpoint, model, and positive integer dimensions");
+  requested.embedding = { endpoint: embeddingEndpoint, model: embeddingModel, dimensions };
+  providers.embedding = { endpoint: embeddingEndpoint, model: embeddingModel, dimensions, privacy: "local", apiKey: config.providers?.embedding?.endpoint === embeddingEndpoint ? config.providers.embedding.apiKey : process.env.MANAS_EMBEDDING_API_KEY };
+ }
+ const rerankerEndpoint = option(args, "--reranker-endpoint"), rerankerModel = option(args, "--reranker-model");
+ if (rerankerEndpoint !== undefined || rerankerModel !== undefined) {
+  if (!rerankerEndpoint || !rerankerModel) throw new Error("reranking requires both --reranker-endpoint and --reranker-model");
+  requested.reranking = { endpoint: rerankerEndpoint, model: rerankerModel };
+  const existing = config.providers?.reranking;
+  providers.reranking = { ...(existing?.endpoint === rerankerEndpoint && existing.model === rerankerModel ? existing : {}), endpoint: rerankerEndpoint, model: rerankerModel, privacy: "local", apiKey: existing?.endpoint === rerankerEndpoint ? existing.apiKey : process.env.MANAS_RERANKER_API_KEY };
+ }
+ return { config: Object.keys(requested).length ? { ...config, providers } : config, requested };
+}
+
+async function executeCatalogCommandWithSignal(command: string, args: string[], config: Config, signal?: AbortSignal): Promise<unknown> {
 	const operation = command === "operation" ? args[0] : CATALOG_COMMANDS[command]?.[args[0] ?? ""];
 	if (!operation) throw new Error(`usage: ${command} <operation> --input <json> --repo <path> [--store <pglite-directory>]`);
 	const inputText = option(args, "--input");
@@ -104,21 +142,42 @@ async function executeCatalogCommand(command: string, args: string[]): Promise<u
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--input must be a JSON object");
 		input = parsed as Record<string, unknown>;
 	}
+	const legacyProviders = legacyBrainProviders(operation, args, config);
 	const remoteUrl = option(args, "--mcp-url");
 	if (remoteUrl) {
 		const token = option(args, "--mcp-token") ?? process.env.MANAS_MCP_TOKEN;
 		if (!token) throw new Error("both --mcp-url and --mcp-token (or MANAS_MCP_TOKEN) are required");
 		return callMcpHttp(remoteUrl, token, operation, input);
 	}
-	const storePath = option(args, "--store");
-	const repository = option(args, "--repo") ? brainRepository(args) : new BrainRepository(storePath ?? ".");
-	const store = storePath ? await openPgliteBrainStore(storePath) : undefined;
 	try {
-		const registry = operationCatalogModule.createFullOperationRegistry({ repository, ...(store ? { store, controlPlane: new controlPlaneModule.DurableControlPlane(store) } : {}) });
-		const requestedScope = option(args, "--scope") ?? "admin";
-		if (!["read", "write", "admin"].includes(requestedScope)) throw new Error("--scope must be read, write, or admin");
-		return await registry.execute({ scope: requestedScope as "read" | "write" | "admin", principal: "cli", tenantId: option(args, "--tenant") ?? "local", ...(option(args, "--brain") ? { brainId: option(args, "--brain") } : {}) }, operation, input);
-	} finally { await store?.close(); }
+		await callLocalService(config, "service.status", {}, { timeoutMs: 2_000, repositoryRoot: option(args, "--repo") });
+	} catch (error) {
+		if (!(error instanceof LocalServiceError) || error.code !== "service_unavailable") throw error;
+		return executeStandaloneCatalogCommand(operation, input, args, legacyProviders.config, signal);
+	}
+	if (Object.keys(legacyProviders.requested).length) await callLocalService(config, "runtime.assert-providers", legacyProviders.requested, { repositoryRoot: option(args, "--repo"), context: catalogContext(args), signal });
+	return callLocalService(config, operation, input, { repositoryRoot: option(args, "--repo"), context: catalogContext(args), signal });
+}
+
+function catalogContext(args: string[]) {
+	const requestedScope = option(args, "--scope") ?? "admin";
+	if (!["read", "write", "admin"].includes(requestedScope)) throw new Error("--scope must be read, write, or admin");
+	return { scope: requestedScope as "read" | "write" | "admin", principal: "cli", tenantId: option(args, "--tenant") ?? "local", ...(option(args, "--brain") ? { brainId: option(args, "--brain") } : {}) };
+}
+
+async function executeStandaloneCatalogCommand(operation: string, input: Record<string, unknown>, args: string[], config: Config, signal?: AbortSignal): Promise<unknown> {
+ const requestedRoot = option(args, "--repo") ?? process.env.MANAS_BRAIN_REPOSITORY ?? selectedCanonicalRuntime?.repositoryRoot;
+ const selectedStore = selectedCanonicalRuntime && requestedRoot && await realpath(requestedRoot).catch(() => resolve(requestedRoot)) === await realpath(selectedCanonicalRuntime.repositoryRoot).catch(() => resolve(selectedCanonicalRuntime!.repositoryRoot)) ? selectedCanonicalRuntime.storePath : undefined;
+ const storePath = option(args, "--store") ?? selectedStore ?? (["notes.capture", "sources.filesystem.sync", "sources.local.import"].includes(operation) ? resolve(config.stateRoot, "runtime") : undefined);
+	const hasRepository = Boolean(option(args, "--repo") || process.env.MANAS_BRAIN_REPOSITORY || selectedCanonicalRuntime);
+	const repository = hasRepository ? brainRepository(args) : new BrainRepository(storePath ?? ".");
+	const engine = hasRepository ? await createBrainEngine({ repositoryRoot: repository.root, storePath, config }) : undefined;
+	const store = engine?.store ?? (storePath ? await openPgliteBrainStore(storePath) : undefined);
+	try {
+		const providers = engine?.providers ?? createBrainProviders(config);
+		const registry = engine?.operations ?? operationCatalogModule.createFullOperationRegistry({ repository, backupConfig: config, stateRoot: config.stateRoot, embeddingProvider: providers.embedding, rerankerProvider: providers.reranking, generationProvider: providers.generation, transcriptionProvider: providers.transcription, ...(store ? { store, controlPlane: new controlPlaneModule.DurableControlPlane(store) } : {}) });
+		return await registry.execute({ ...catalogContext(args), signal }, operation, input);
+	} finally { if (engine) await engine.close(); else await store?.close(); }
 }
 
 function usage(): string {
@@ -128,6 +187,7 @@ Configuration precedence:
   --config <path> → MANAS_CONFIG_FILE → home .config/manas/config.json → built-in defaults
 
 Commands:
+  service start --repo <brain> [--store <state-directory>] | status | stop
   setup [--archive <path>] [--config <path>] [--yes] [--no-schedule] [--detect-only|--preview|--repair] [--retire-legacy] [--json]
   sync [--config <path>] [--provider <name>] [--dry-run|--scheduled]
   import chatgpt <zip-or-json>
@@ -140,13 +200,27 @@ Commands:
   migrate-identifiers [--preview|--yes] [--json]
   index [--rebuild|--repair]
   search <query> [--limit <1-100>] [--keyword-only|--semantic-only]
+  remember|recall|correct|forget --input <json> [--repo <brain> --store <state-directory>]
+  memory history --input <json> [--repo <brain>]
+  google connect|add|enable|status|sync|schedule --input <json>
+  entities put|resolve|reviews --input <json>
+  relationships put|query --input <json>
+  questions put|get|list|refresh --input <json>
+  answers get|feedback|feedback-reset --input <json>
+  migration preview|resume|status|shadow|activate|rollback
+  ui start|open|status|stop [--port <port>]
+  devices peers|preview|enable|status|disable [--input <json>] [--preview]
+  agents preview|install|status|uninstall codex|claude-code [--capture] [--write]
+  agents verify codex|claude-code --query <visible evidence query>
+  service start|status|stop|preview|install|installation-status|uninstall
+  backup create|verify|restore
   think <question>
   get <manas-id>
   related <manas-id>
   health
-  jobs list|enqueue-index|schedule-index|schedules|run-one|cancel --store <pglite-directory> [--repo <brain-repository>] [--id <job-id>] [--at <ISO-timestamp>] [--every-seconds <seconds>] [--limit <1-1000>]
+  jobs list|enqueue-index|schedule-index|schedules|run-one|cancel [--store <pglite-directory>] [--repo <brain-repository>] [--id <job-id>] [--at <ISO-timestamp>] [--every-seconds <seconds>] [--limit <1-1000>]
   serve [--http-port <port>]
-  auth create|list|revoke --store <pglite-directory>
+  auth create|list|events|revoke [--store <pglite-directory>]
   models diagnose|activate, agents, autopilot, dream, maintenance, sources, plugins, schema, upgrade, skills, admin, cache, storage, integrity, anomaly, evaluation, analysis, rollback, connect
 	  operation <catalog-operation> --input <json> --repo <path> [--store <pglite-directory>] | --mcp-url <url> --mcp-token <token>
   doctor [--json]
@@ -156,7 +230,7 @@ Commands:
 
 function brainRepository(args: string[]) {
 	const supplied = option(args, "--repo");
-	const root = supplied ?? process.env.MANAS_BRAIN_REPOSITORY;
+	const root = supplied ?? process.env.MANAS_BRAIN_REPOSITORY ?? selectedCanonicalRuntime?.repositoryRoot;
 	if (!root) throw new Error("brain repository must be supplied with --repo or MANAS_BRAIN_REPOSITORY");
 	return new BrainRepository(root);
 }
@@ -226,14 +300,14 @@ function mcpScopes(): Array<"read" | "write" | "admin"> {
 
 function hostedOperationAuthorizer(store: ConstructorParameters<typeof SqlTenantDirectory>[0]) {
 	const directory = new SqlTenantDirectory(store);
-	return async (principal: { id: string; tenantId: string; userId?: string }, definition: { requiredScope: "read" | "write" | "admin" }, input: Record<string, unknown>): Promise<void> => {
+	return async (principal: { id: string; tenantId: string; userId?: string }, definition: { requiredScope: "read" | "write" | "admin" }, input: Record<string, unknown>): Promise<void | { allowedAccessLabels?: string[] }> => {
 		if (!principal.userId) return;
 		const brainId = typeof input.brainId === "string" ? input.brainId : undefined;
 		const labels = Array.isArray(input.labels) ? input.labels.filter((label): label is string => typeof label === "string") : [];
 		const authorization = await directory.authorizeWithLabels(principal.userId, principal.tenantId, brainId, definition.requiredScope);
-			const allowedAccessLabels = authorization.allowedAccessLabels;
-			if (allowedAccessLabels && labels.some((label) => !allowedAccessLabels.includes(label))) throw new Error("scope is not authorized");
-		return;
+		const allowedAccessLabels = authorization.allowedAccessLabels;
+		if (allowedAccessLabels && labels.some((label) => !allowedAccessLabels.includes(label))) throw new Error("scope is not authorized");
+		return { allowedAccessLabels };
 	};
 }
 
@@ -273,6 +347,11 @@ function failure(command: string | undefined, error: unknown): void {
 		const exitCode = partial.setupExitCode ?? category.exitCode;
 		console.log(JSON.stringify({ ...base, exitCode, error: { code: partial.setupCode ?? category.code, message } }));
 		process.exitCode = exitCode;
+		return;
+	}
+ const domain = error as Error & { code?: unknown; retryable?: unknown; suggestedFix?: unknown };
+ if (error instanceof LocalServiceError || error instanceof StoreOwnedError || error instanceof MemoryOperationError || error instanceof Error && typeof domain.code === "string" && typeof domain.retryable === "boolean" && typeof domain.suggestedFix === "string") {
+		console.log(JSON.stringify({ ok: false, command: command ?? "unknown", error: { code: domain.code, message: domain.message, retryable: domain.retryable, suggestedFix: domain.suggestedFix } }, null, 2));
 		return;
 	}
 	const diagnosticMessage = process.env.MANAS_DIAGNOSTICS === "1" ? message.slice(0, 1_000) : undefined;
@@ -420,6 +499,7 @@ async function main(): Promise<void> {
 	const { args, configPath } = parseGlobalArguments(process.argv.slice(2));
 	const command = args[0];
 	invokedCommand = command;
+	if (args.includes("--allow-hosted-model")) throw new MemoryOperationError("local_inference_required", "Manas-managed inference must stay local.", "Configure a loopback model endpoint and remove --allow-hosted-model.");
 	if (command === "--version" || command === "version") {
 		console.log(MANAS_VERSION);
 		return;
@@ -474,73 +554,212 @@ async function main(): Promise<void> {
 		return;
 	}
 	const config = await loadConfig({ ...(configPath ? { filePath: configPath } : {}) });
-	const legacyJobsCommand = command === "jobs" && !CATALOG_COMMANDS.jobs?.[args[1] ?? ""];
+	if (command === "hook") {
+		let input: unknown;
+		try {
+			const read = async () => {
+				const chunks: Uint8Array[] = []; let size = 0;
+				for await (const chunk of Bun.stdin.stream()) { size += chunk.byteLength; if (size > 65536) throw new Error("hook input too large"); chunks.push(chunk); }
+				return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			};
+			input = await read();
+		} catch { console.log("{}"); return; }
+		const agent = option(args, "--agent");
+		console.log(JSON.stringify(agent === "codex" || agent === "claude-code" ? await runAgentHook(config, agent, input, option(args, "--installation")) : {}));
+		return;
+	}
+ if (command === "agents" && args[1] === "verify") {
+  rejectUnknownFlags(args.slice(3), ["--home", "--query"]);
+  const agent = args[2], query = option(args, "--query");
+  if (!configPath || !["codex", "claude-code"].includes(agent) || !query) throw new Error("usage: agents verify codex|claude-code --config <path> --query <visible evidence query>");
+  success(command, await verifyAgentIntegration(config, { agent: agent as ManagedAgent, home: option(args, "--home") ?? homedir(), stateRoot: config.stateRoot, configPath }, query));
+  return;
+ }
+	if (command === "agents" && ["preview", "install", "uninstall", "status"].includes(args[1]) && ["codex", "claude-code"].includes(args[2])) {
+        rejectUnknownFlags(args.slice(3), ["--home", "--capture", "--visibility", "--write", "--no-mcp"]);
+        if (["install", "uninstall"].includes(args[1]) && !configPath) throw new Error("agent install/uninstall requires an explicit --config");
+        const visibility: unknown = option(args, "--visibility") ? JSON.parse(option(args, "--visibility")!) : args.includes("--capture") ? ["personal"] : [];
+        if (!Array.isArray(visibility) || visibility.some((label) => typeof label !== "string" || !label.trim())) throw new Error("--visibility must be a JSON array of labels");
+        const options = { agent: args[2] as ManagedAgent, home: option(args, "--home") ?? homedir(), stateRoot: config.stateRoot };
+        const managed = { ...options, capture: args.includes("--capture"), write: args.includes("--write"), visibility: ["status", "uninstall"].includes(args[1]) && !option(args, "--visibility") ? undefined : visibility as string[], configPath: configPath ?? "", executable: executableCommand({ execPath: process.execPath, bunPath: Bun.which("bun") ?? undefined, entrypoint: import.meta.path }) };
+        const mode = args[1] as "preview" | "install" | "status" | "uninstall";
+        if (mode === "install") {
+            await manageAgentHooks(managed, "preview");
+            if (!args.includes("--no-mcp") && (await manageAgentMcp(managed, "preview")).action === "conflict") throw new Error("Existing manas MCP configuration is not owned; inspect preview or use --no-mcp.");
+        }
+        const action = mode === "preview" ? previewAgentInstallation : mode === "install" ? installAgentSkills : mode === "uninstall" ? uninstallAgentSkills : agentInstallationStatus;
+        const skills = await action(options);
+        const hooks = configPath ? await manageAgentHooks(managed, mode) : { hooksInstalled: false, suggestedFix: "Supply --config to manage agent hooks." };
+        // Uninstall always revokes a previously managed grant, including when config edits must be retained.
+        const mcp = configPath && (!args.includes("--no-mcp") || mode === "uninstall") ? await manageAgentMcp(managed, mode) : { skipped: true };
+        success(command, { skills, hooks, mcp });
+		return;
+	}
+	const selection = await loadCanonicalSelection(config);
+	selectedCanonicalRuntime = selection?.mode === "canonical" ? selection : undefined;
+ if (command === "ui") {
+  rejectUnknownFlags(args.slice(2), ["--port", "--json", "--config", "--no-browser"]);
+  if (!["start", "open", "status", "stop"].includes(args[1] ?? "")) throw new Error("usage: ui start|open|status|stop [--port <port>]");
+  const port = option(args, "--port");
+  if (port !== undefined && !/^[0-9]+$/.test(port)) throw new Error("--port must be an integer");
+  if (port !== undefined && !["start", "open"].includes(args[1])) throw new Error("--port is supported by ui start and open");
+  const result = await callLocalService(config, "ui." + args[1], port === undefined ? {} : { port: Number(port) }) as Record<string, unknown>;
+  if (args[1] === "open" && !args.includes("--json") && !args.includes("--no-browser") && process.platform === "darwin") {
+   const browser = Bun.spawn(["/usr/bin/open", String(result.url)], { stdout: "ignore", stderr: "ignore" });
+   result.browserOpened = await browser.exited === 0;
+  }
+  success(command, result);
+  return;
+ }
+
+ if (command === "devices") {
+  const action = args[1];
+  if (!["peers", "preview", "enable", "status", "disable"].includes(action ?? "")) throw new Error("usage: devices peers|status|preview|enable|disable [--input <json>] [--preview]");
+  rejectUnknownFlags(args.slice(2), ["--input", "--preview", "--json", "--config"]);
+  rejectUnexpectedArguments(args.slice(2), ["--input", "--config"]);
+  if (args.includes("--preview") && action !== "disable") throw new Error("--preview is supported only by devices disable");
+  const raw = option(args, "--input");
+  if (["preview", "enable"].includes(action) !== (raw !== undefined)) throw new Error("devices preview and enable require --input; other device commands do not accept --input");
+  const input = raw === undefined ? action === "disable" ? { preview: args.includes("--preview") } : {} : JSON.parse(raw);
+  success(command, await callLocalService(config, "devices." + action, input));
+  return;
+ }
+
+	if (command === "service") {
+		const subcommand = args[1];
+		if (["install", "preview", "installation-status", "uninstall"].includes(subcommand ?? "")) {
+			rejectUnknownFlags(args.slice(2), ["--repo", "--store", "--binary", "--config", "--json", "--preview"]);
+			if (subcommand === "uninstall") { success(command, await (args.includes("--preview") ? previewServiceRemoval(config) : uninstallService(config))); return; }
+			if (args.includes("--preview")) throw new Error("--preview is supported by service uninstall; use service preview to preview installation");
+			if (subcommand === "installation-status") { success(command, await serviceInstallationStatus(config)); return; }
+			const repositoryRoot = option(args, "--repo") ?? selectedCanonicalRuntime?.repositoryRoot;
+			if (!repositoryRoot || !configPath) throw new Error("service installation requires --repo <brain> and --config <path>");
+			const installedBinary = option(args, "--binary") ?? process.execPath;
+			if (subcommand === "install" && (!isCompiledExecutable(Bun.main) || installedBinary !== process.execPath)) throw new Error("service installation must be run by the installed release binary; preview accepts --binary");
+			const target = { installedBinary, configPath, repositoryRoot, storePath: option(args, "--store") };
+			success(command, await (subcommand === "preview" ? previewServiceInstallation(config, target) : installService(config, target)));
+			return;
+		}
+		if (subcommand === "status" || subcommand === "stop") {
+			success(command, await callLocalService(config, "service." + subcommand, {}, { timeoutMs: 2_000 }));
+			return;
+		}
+		if (subcommand !== "start") throw new Error("usage: service start --repo <brain> [--store <state-directory>] | status | stop");
+		const repositoryRoot = option(args, "--repo") ?? process.env.MANAS_BRAIN_REPOSITORY ?? selectedCanonicalRuntime?.repositoryRoot;
+		if (!repositoryRoot) throw new Error("service start requires --repo <brain>");
+		let stop!: () => void;
+		const stopped = new Promise<void>((done) => { stop = done; });
+		const service = await startLocalService({ config, repositoryRoot, storePath: option(args, "--store") ?? resolve(config.stateRoot, "runtime"), onStop: stop, onWorkerError: (error) => console.error("Manas worker:", errorMessage(error)) });
+		process.once("SIGINT", stop);
+		process.once("SIGTERM", stop);
+		try {
+			success(command, { running: true, repositoryRoot: service.engine.repository.root });
+			await stopped;
+		} finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); await service.close(); }
+		return;
+	}
+
+	if (command === "backup") {
+		const mode = args[1];
+		if (!["create", "verify", "restore"].includes(mode ?? "")) throw new Error("usage: backup create --repo <brain> --store <store> --to <new-directory> | verify --from <backup> | restore --from <backup> --to <new-directory>");
+		rejectUnknownFlags(args.slice(2), ["--repo", "--store", "--to", "--from", "--json"]);
+		rejectUnexpectedArguments(args.slice(2), ["--repo", "--store", "--to", "--from"]);
+		const input = mode === "create"
+			? { repositoryRoot: option(args, "--repo") ?? selectedCanonicalRuntime?.repositoryRoot, storePath: option(args, "--store") ?? selectedCanonicalRuntime?.storePath ?? resolve(config.stateRoot, "runtime"), destination: option(args, "--to") }
+			: { backupPath: option(args, "--from"), ...(mode === "restore" ? { destination: option(args, "--to") } : {}) };
+		if (Object.values(input).some((value) => !value)) throw new Error("backup requires explicit source and destination paths");
+		const definition = runtimeBackupOperations(config).find((entry) => entry.name === "backup." + mode)!;
+		const registry = new operationRegistryModule.OperationRegistry(); registry.register(definition);
+		success(command, await registry.execute({ scope: "admin", principal: "owner", tenantId: "local" }, definition.name, input));
+		return;
+	}
+
+	if (["remember", "recall", "correct", "forget"].includes(command)) {
+		success(command, await executeCatalogCommand("memory", [command, ...args.slice(1)], config));
+		return;
+	}
+	if (command === "migration") {
+		const subcommand = args[1];
+		rejectUnknownFlags(args.slice(2), ["--from", "--repo", "--id", "--queries", "--expected-head", "--accept-shadow-differences"]);
+		if (subcommand === "preview") {
+			const source = option(args, "--from"), target = option(args, "--repo");
+			if (!source || !target) throw new Error("usage: migration preview --from <archive> --repo <new-brain>");
+			success(command, await previewArchiveMigration(source, target, config.stateRoot));
+		} else if (subcommand === "rollback") {
+			success(command, await rollbackCanonicalArchive(config));
+		} else {
+			const id = option(args, "--id");
+			if (!id || !["resume", "status", "shadow", "activate"].includes(subcommand)) throw new Error("usage: migration resume|status|shadow|activate --id <receipt-id>");
+			if (subcommand === "shadow") {
+				const queries = JSON.parse(option(args, "--queries") ?? "[]");
+				if (!Array.isArray(queries) || queries.some((query) => typeof query !== "string")) throw new Error("--queries must be a JSON array of strings");
+				success(command, await shadowArchiveMigration(config, id, queries));
+			} else if (subcommand === "activate") {
+				const commit = option(args, "--expected-head");
+				if (!commit) throw new Error("migration activate requires --expected-head <verified-commit>");
+				success(command, await activateCanonicalArchive(config, id, commit, args.includes("--accept-shadow-differences")));
+			} else success(command, subcommand === "resume" ? await applyArchiveMigration(config.stateRoot, id) : await readArchiveMigration(config.stateRoot, id));
+		}
+		return;
+	}
+ const legacyJobsCommand = command === "jobs" && (!CATALOG_COMMANDS.jobs?.[args[1] ?? ""] || !args.includes("--input") && ["list", "schedules", "cancel"].includes(args[1] ?? ""));
+
 	if (command === "operation" || (CATALOG_COMMANDS[command] && !legacyJobsCommand)) {
 		rejectUnknownFlags(args.slice(1), ["--input", "--repo", "--store", "--tenant", "--brain", "--scope", "--mcp-url", "--mcp-token"]);
-		success(command, await executeCatalogCommand(command, args.slice(1)));
+		success(command, await executeCatalogCommand(command, args.slice(1), config));
 		return;
 	}
 	if (command === "capture") {
-		rejectUnknownFlags(args.slice(1), ["--file", "--stdin", "--repo"]);
+		rejectUnknownFlags(args.slice(1), ["--file", "--stdin", "--repo", "--store"]);
 		const file = option(args, "--file");
 		const stdin = args.includes("--stdin");
-		const positional = args.slice(1).filter((value, index, values) => !value.startsWith("--") && values[index - 1] !== "--file" && values[index - 1] !== "--repo");
+		const positional = args.slice(1).filter((value, index, values) => !value.startsWith("--") && values[index - 1] !== "--file" && values[index - 1] !== "--repo" && values[index - 1] !== "--store");
 		if ((file ? 1 : 0) + (stdin ? 1 : 0) > 1 || ((file || stdin) && positional.length) || (!file && !stdin && !positional.length)) throw new Error("usage: capture <markdown> | capture --file <path> | capture --stdin");
 		const content = file ? await Bun.file(file).text() : stdin ? await Bun.stdin.text() : positional.join(" ");
-		success(command, await captureBrainNote(brainRepository(args), content));
+		success(command, await executeCatalogCommand("operation", ["notes.capture", "--input", JSON.stringify({ content }), ...args.slice(1)], config));
 		return;
 	}
 	if (command === "brain") {
 		const subcommand = args[1];
 		rejectUnknownFlags(args.slice(2), ["--repo", "--store", "--query", "--semantic", "--expand", "--embedding-endpoint", "--embedding-model", "--embedding-dimensions", "--reranker-endpoint", "--reranker-model", "--allow-hosted-model", "--source-path", "--source-id", "--file", "--format", "--path", "--content", "--expected-revision", "--expected-head", "--from", "--to", "--id", "--include-deleted", "--ref", "--limit", "--depth", "--retention-days", "--confirm-purge", "--schema-id", "--schema-version", "--schema-file", "--list-packs", "--candidates", "--labels", "--mcp-url", "--mcp-token"]);
 		if (option(args, "--mcp-url")) { success(command, await remoteBrainOperation(subcommand, args)); return; }
-		if (subcommand === "extract") {
-			const file = option(args, "--file");
-			if (!file) throw new Error("usage: brain extract --file <path>");
-			success(command, await extractLocalFile(file));
-			return;
-		}
-		const repository = brainRepository(args);
-		if (subcommand === "doctor") {
-			const storePath = option(args, "--store");
-			if (!storePath) {
-				const result = await diagnoseBrain(repository);
-				success(command, result);
-				if (!result.ok) process.exitCode = 1;
-				return;
-			}
-			const store = await openPgliteBrainStore(storePath);
-			try {
-				const result = await diagnoseBrain(repository, store);
-				success(command, result);
-				if (!result.ok) process.exitCode = 1;
-			} finally { await store.close(); }
-			return;
-		}
-		if (subcommand === "init") {
-			await repository.initialize();
-			success(command, { initialized: true, root: repository.root });
-			return;
-		}
+        const executeBrainOperation = (name: string, input: Record<string, unknown>) => executeCatalogCommand("operation", [name, "--input", JSON.stringify(input), ...args.slice(2)], config);
+        if (subcommand === "extract") {
+            const file = option(args, "--file");
+            if (!file) throw new Error("usage: brain extract --file <path>");
+            success(command, await executeBrainOperation("runtime.extract", { path: resolve(file) }));
+            return;
+        }
+        const repository = brainRepository(args);
+        if (subcommand === "doctor") {
+            const result = await executeBrainOperation("runtime.doctor", {}) as { ok: boolean };
+            success(command, result);
+            if (!result.ok) process.exitCode = 1;
+            return;
+        }
+        if (subcommand === "init") {
+            success(command, await executeBrainOperation("runtime.init", {}));
+            return;
+        }
 		if (subcommand === "status") {
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "brain_status", {}));
+			success(command, await executeBrainOperation("brain_status", {}));
 			return;
 		}
 		if (subcommand === "verify") {
-			const result = await repository.verify(option(args, "--ref"));
+			const result = await executeBrainOperation("runtime.verify", { ref: option(args, "--ref") }) as { valid: boolean; issues: string[] };
 			if (!result.valid) throw new Error(`brain repository verification failed: ${result.issues.join("; ")}`);
 			success(command, result);
 			return;
 		}
 		if (subcommand === "repair") {
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "repair_brain", { expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("repair_brain", { expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "history") {
 			const path = option(args, "--path");
 			if (!path) throw new Error("usage: brain history --path <path> [--limit <1-500>]");
 			const limit = Number(option(args, "--limit") ?? "50");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "page_history", { path, limit }));
+			success(command, await executeBrainOperation("page_history", { path, limit }));
 			return;
 		}
 		if (subcommand === "revert") {
@@ -548,7 +767,7 @@ async function main(): Promise<void> {
 			const ref = option(args, "--ref");
 			const expected = option(args, "--expected-revision");
 			if (!path || !ref || !expected) throw new Error("usage: brain revert --path <path> --ref <commit> --expected-revision <revision>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "revert_page", { path, ref, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("revert_page", { path, ref, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "schema") {
@@ -557,23 +776,22 @@ async function main(): Promise<void> {
 			const schemaFile = option(args, "--schema-file");
 			if (args.includes("--list-packs")) {
 				if (id || version || schemaFile || args.includes("--candidates")) throw new Error("schema list cannot be combined with another schema action");
-				success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "list_schema_packs", {}));
+				success(command, await executeBrainOperation("list_schema_packs", {}));
 				return;
 			}
 			if (schemaFile) {
 				if (id || version || args.includes("--candidates")) throw new Error("schema file cannot be combined with another schema action");
-				success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "install_schema_pack", { pack: JSON.parse(await Bun.file(schemaFile).text()), expectedHead: option(args, "--expected-head") }));
+				success(command, await executeBrainOperation("install_schema_pack", { pack: JSON.parse(await Bun.file(schemaFile).text()), expectedHead: option(args, "--expected-head") }));
 				return;
 			}
 			if (args.includes("--candidates")) {
 				if (id || version) throw new Error("schema candidates cannot be activated in the same command");
-				const pages = await repository.listPages();
-				success(command, { candidates: detectSchemaPack(pages.map((page: { path: string }) => page.path)) });
+				success(command, await executeBrainOperation("runtime.schema-candidates", {}));
 				return;
 			}
-			if (!id && !version) { success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "get_schema", {})); return; }
+			if (!id && !version) { success(command, await executeBrainOperation("get_schema", {})); return; }
 			if (!id || !version) throw new Error("usage: brain schema --schema-id <id> --schema-version <version> --repo <path>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "set_schema_pack", { id, version, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("set_schema_pack", { id, version, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "access") {
@@ -581,140 +799,66 @@ async function main(): Promise<void> {
 			const labels = option(args, "--labels");
 			const expected = option(args, "--expected-revision");
 			if (!path || labels === undefined || !expected) throw new Error("usage: brain access --path <path> --labels <comma-separated-labels> --expected-revision <revision>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "set_page_access_labels", { path, labels: labels ? labels.split(",") : [], expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("set_page_access_labels", { path, labels: labels ? labels.split(",") : [], expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "migrate") {
 			const from = option(args, "--from");
 			if (!from) throw new Error("usage: brain migrate --from <legacy-archive> --repo <path>");
-			success(command, await migrateLegacyArchive(from, repository));
+			success(command, await migrateLegacyArchive(from, repository, { stateRoot: config.stateRoot, receiptId: option(args, "--id") }));
 			return;
 		}
-		if (subcommand === "index" || subcommand === "embed" || subcommand === "search") {
-			const storePath = option(args, "--store");
-			if (!storePath) throw new Error("brain index and search require --store <pglite-directory>");
-			const store = await openPgliteBrainStore(storePath);
-			try {
-				if (subcommand === "index") success(command, await indexBrainRepository(store, repository));
-				else if (subcommand === "embed") {
-					const endpoint = option(args, "--embedding-endpoint");
-					const model = option(args, "--embedding-model");
-					const dimensions = Number(option(args, "--embedding-dimensions"));
-					if (!endpoint || !model || !Number.isInteger(dimensions) || dimensions < 1) throw new Error("usage: brain embed --store <pglite-directory> --embedding-endpoint <url> --embedding-model <name> --embedding-dimensions <number>");
-					success(command, await indexLocalEmbeddings(store, new OpenAiCompatibleEmbeddingProvider({ id: model, dimensions }, endpoint, process.env.MANAS_EMBEDDING_API_KEY, args.includes("--allow-hosted-model") ? "hosted" : "local")));
-				}
-				else {
-					const query = option(args, "--query");
-					if (!query) throw new Error("usage: brain search --query <query> --store <pglite-directory>");
-						if (args.includes("--semantic")) {
-							const endpoint = option(args, "--embedding-endpoint");
-							const model = option(args, "--embedding-model");
-							const dimensions = Number(option(args, "--embedding-dimensions"));
-							if (!endpoint || !model || !Number.isInteger(dimensions) || dimensions < 1) throw new Error("semantic search requires embedding endpoint, model, and dimensions");
-							const embeddingProvider = new OpenAiCompatibleEmbeddingProvider({ id: model, dimensions }, endpoint, process.env.MANAS_EMBEDDING_API_KEY, args.includes("--allow-hosted-model") ? "hosted" : "local");
-							const rerankerEndpoint = option(args, "--reranker-endpoint");
-							const rerankerModel = option(args, "--reranker-model");
-							if (Boolean(rerankerEndpoint) !== Boolean(rerankerModel)) throw new Error("reranking requires both --reranker-endpoint and --reranker-model");
-							const rerankerProvider = rerankerEndpoint && rerankerModel ? new OpenAiCompatibleRerankerProvider(rerankerModel, rerankerEndpoint, process.env.MANAS_RERANKER_API_KEY, args.includes("--allow-hosted-model") ? "hosted" : "local") : undefined;
-							success(command, { results: await searchVerifiedHybridBrainRepository(store, repository, query, { embeddingProvider, ...(rerankerProvider ? { rerankerProvider } : {}), brainId: (await repository.snapshot()).brainId, limit: 20 }) });
-					} else {
-						const snapshot = await repository.snapshot();
-						const expanded = args.includes("--expand") ? await searchExpandedBrainRepository(store, query, 20, snapshot.brainId) : undefined;
-						const results = expanded?.results ?? await searchBrainRepository(store, query, 20, snapshot.brainId);
-						const rerankerEndpoint = option(args, "--reranker-endpoint");
-						const rerankerModel = option(args, "--reranker-model");
-						if (Boolean(rerankerEndpoint) !== Boolean(rerankerModel)) throw new Error("reranking requires both --reranker-endpoint and --reranker-model");
-						const reranked = rerankerEndpoint && rerankerModel ? await rerankProjectedSearchResults(new OpenAiCompatibleRerankerProvider(rerankerModel, rerankerEndpoint, process.env.MANAS_RERANKER_API_KEY, args.includes("--allow-hosted-model") ? "hosted" : "local"), query, results) : results;
-						const verified = await Promise.all((reranked as Array<{ citation: Parameters<typeof resolveBrainCitation>[2] }>).map(async (result) => ({ ...result, verifiedText: (await resolveBrainCitation(store, repository, result.citation)).text })));
-						success(command, expanded ? { variants: expanded.variants, results: verified } : { results: verified });
-					}
-				}
-			} finally { await store.close(); }
-			return;
-		}
-		if (subcommand === "related") {
-			const path = option(args, "--path");
-			const storePath = option(args, "--store");
-			if (!path || !storePath) throw new Error("usage: brain related --path <path> --store <pglite-directory>");
-			const depth = Number(option(args, "--depth") ?? "1");
-			if (!Number.isInteger(depth) || depth < 1 || depth > 5) throw new Error("graph traversal depth must be an integer between 1 and 5");
-			const store = await openPgliteBrainStore(storePath);
-			try {
-				const snapshot = await repository.snapshot();
-				success(command, depth === 1 ? { pages: await relatedBrainPages(store, path, snapshot.brainId) } : { pages: await traverseBrainGraph(store, path, snapshot.brainId, depth) });
-			} finally { await store.close(); }
-			return;
-		}
-		if (subcommand === "sources-list") {
-			const pages = await repository.listPages(true);
-			const sources = new Map<string, { id: string; documents: number; stale: number }>();
-			for (const page of pages) if (page.source) {
-				const value = sources.get(page.source.type) ?? { id: page.source.type, documents: 0, stale: 0 };
-				value.documents += 1;
-				if (page.stale) value.stale += 1;
-				sources.set(page.source.type, value);
-			}
-			success(command, { sources: [...sources.values()].sort((left, right) => left.id.localeCompare(right.id)) });
-			return;
-		}
+        if (subcommand === "index") {
+            success(command, await executeCatalogCommand("operation", ["projection.rebuild", ...args.slice(1)], config));
+            return;
+        }
+        if (subcommand === "search") {
+            const query = option(args, "--query");
+            if (!query) throw new Error("usage: brain search --query <query> [--store <pglite-directory>]");
+            success(command, await executeBrainOperation("retrieval.search", { query, expand: args.includes("--expand"), rerank: args.includes("--reranker-endpoint") || args.includes("--reranker-model"), options: { mode: args.includes("--semantic") ? "semantic" : "keyword" } }));
+            return;
+        }
+        if (subcommand === "embed") {
+            success(command, await executeBrainOperation("projection.embed", {}));
+            return;
+        }
+        if (subcommand === "related") {
+            const path = option(args, "--path");
+            if (!path) throw new Error("usage: brain related --path <path> [--store <pglite-directory>]");
+            success(command, await executeBrainOperation("retrieval.traverse", { path, depth: Number(option(args, "--depth") ?? "1") }));
+            return;
+        }
+        if (subcommand === "sources-list") {
+            success(command, await executeBrainOperation("runtime.source-inventory", {}));
+            return;
+        }
 		if (subcommand === "sources-sync") {
 			const sourcePath = option(args, "--source-path");
 			if (!sourcePath) throw new Error("usage: brain sources-sync --source-path <directory> [--source-id <id>] --repo <path>");
-			const adapter = new FilesystemSourceAdapter(sourcePath, option(args, "--source-id") ?? "filesystem");
-			const state = await loadState(config.stateRoot);
-			const checkpoints = {
-				get: async (sourceId: string) => state.sourceCheckpoints?.[sourceId],
-				set: async (sourceId: string, checkpoint: { updatedAt?: string }) => { state.sourceCheckpoints = { ...state.sourceCheckpoints, [sourceId]: checkpoint }; },
-			};
-			const result = await syncSource(adapter, repository, checkpoints);
-			const storePath = option(args, "--store");
-			if (storePath) {
-				const store = await openPgliteBrainStore(storePath);
-				try { await enqueueJob(store, { type: "index", payload: { repositoryRoot: repository.root } }); }
-				finally { await store.close(); }
-			}
-			await saveState(config.stateRoot, state);
-			success(command, result);
+            success(command, await executeBrainOperation("sources.filesystem.sync", { path: resolve(sourcePath), sourceId: option(args, "--source-id") ?? "filesystem" }));
 			return;
 		}
 		if (subcommand === "export") {
 			const ref = option(args, "--ref");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "export_brain", { ...(ref ? { ref } : {}), includeDeleted: args.includes("--include-deleted") }));
+			success(command, await executeBrainOperation("export_brain", { ...(ref ? { ref } : {}), includeDeleted: args.includes("--include-deleted") }));
 			return;
 		}
 		if (subcommand === "import") {
 			const file = option(args, "--file");
 			const format = option(args, "--format");
 			if (!file || !format || !["eml", "mbox", "ics", "meeting"].includes(format)) throw new Error("usage: brain import --file <path> --format eml|mbox|ics|meeting --repo <path>");
-			const text = await Bun.file(file).text();
-			const imported = format === "eml" ? [genericImportModule.importEml(text)]
-				: format === "mbox" ? genericImportModule.importMbox(text)
-				: format === "ics" ? genericImportModule.importIcs(text)
-				: [genericImportModule.importMeeting(text)];
-			const sourceId = option(args, "--source-id") ?? `local-import:${format}`;
-			const result = await syncSource({
-				id: sourceId,
-				describe: () => ({ id: sourceId, version: "1", kind: format, trusted: true }),
-				list: async () => imported,
-			}, repository);
-			const storePath = option(args, "--store");
-			if (storePath) {
-				const store = await openPgliteBrainStore(storePath);
-				try { await enqueueJob(store, { type: "index", payload: { repositoryRoot: repository.root } }); }
-				finally { await store.close(); }
-			}
-			success(command, { ...result, sourceId, imported: imported.length });
+            success(command, await executeBrainOperation("sources.local.import", { path: resolve(file), format, sourceId: option(args, "--source-id") ?? "local-import:" + format }));
 			return;
 		}
 		if (subcommand === "list") {
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "list_pages", { includeDeleted: args.includes("--include-deleted") }));
+			success(command, await executeBrainOperation("list_pages", { includeDeleted: args.includes("--include-deleted") }));
 			return;
 		}
 		const path = option(args, "--path");
 		if (subcommand === "get") {
 			if (!path) throw new Error("usage: brain get --path <path>");
 			const ref = option(args, "--ref");
-			try { success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, ref ? "get_page_at" : "get_page", ref ? { path, ref } : { path, includeDeleted: args.includes("--include-deleted") })); }
+			try { success(command, await executeBrainOperation(ref ? "get_page_at" : "get_page", ref ? { path, ref } : { path, includeDeleted: args.includes("--include-deleted") })); }
 			catch (error) { if (error instanceof Error && error.message === "invalid params") throw new Error("brain page not found"); throw error; }
 			return;
 		}
@@ -722,7 +866,14 @@ async function main(): Promise<void> {
 			const content = option(args, "--content");
 			if (!path || content === undefined) throw new Error("usage: brain put --path <path> --content <markdown>");
 			const expectedRevision = option(args, "--expected-revision");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "put_page", { path, content, ...(expectedRevision ? { expectedRevision } : {}), expectedHead: option(args, "--expected-head") ?? null }));
+			let expectedHead = option(args, "--expected-head");
+			if (expectedHead === undefined) {
+				const status = await executeBrainOperation("brain_status", {}) as { head?: string; pages: { active: number; deleted: number } };
+				// Keep first-create compatibility after the empty runtime bootstrap.
+				// The write still compares this exact head, including concurrent changes.
+				if (status.pages.active === 0 && status.pages.deleted === 0) expectedHead = status.head;
+			}
+			success(command, await executeBrainOperation("put_page", { path, content, ...(expectedRevision ? { expectedRevision } : {}), expectedHead: expectedHead ?? null }));
 			return;
 		}
 		if (subcommand === "move") {
@@ -730,27 +881,27 @@ async function main(): Promise<void> {
 			const to = option(args, "--to");
 			const expected = option(args, "--expected-revision");
 			if (!from || !to || !expected) throw new Error("usage: brain move --from <path> --to <path> --expected-revision <revision>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "move_page", { from, to, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("move_page", { from, to, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "delete") {
 			const expected = option(args, "--expected-revision");
 			if (!path || !expected) throw new Error("usage: brain delete --path <path> --expected-revision <revision>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "delete_page", { path, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("delete_page", { path, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "restore") {
 			const id = option(args, "--id");
 			const expected = option(args, "--expected-revision");
 			if (!id || !path || !expected) throw new Error("usage: brain restore --id <id> --path <path> --expected-revision <revision>");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "restore_page", { id, path, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
+			success(command, await executeBrainOperation("restore_page", { id, path, expectedRevision: expected, expectedHead: option(args, "--expected-head") }));
 			return;
 		}
 		if (subcommand === "purge") {
 			const id = option(args, "--id");
 			if (!args.includes("--confirm-purge") || !id) throw new Error("usage: brain purge --id <deleted-page-id> --confirm-purge --expected-head <git-commit>");
 			const retentionDays = option(args, "--retention-days");
-			success(command, await brainOperationModule.executeBrainRepositoryOperation(repository, "purge_deleted_page", { id, expectedHead: option(args, "--expected-head"), ...(retentionDays ? { retentionDays: Number(retentionDays) } : {}) }));
+			success(command, await executeBrainOperation("purge_deleted_page", { id, expectedHead: option(args, "--expected-head"), ...(retentionDays ? { retentionDays: Number(retentionDays) } : {}) }));
 			return;
 		}
 		throw new Error("usage: brain init|migrate|verify|doctor|repair|history|revert|status|schema|access|index|embed|search|related|sources-list|sources-sync|import|extract|export|list|get|put|move|delete|restore|purge");
@@ -892,6 +1043,10 @@ async function main(): Promise<void> {
 		rejectUnknownFlags(args.slice(1), ["--rebuild", "--repair"]);
 		if (args.includes("--rebuild") && args.includes("--repair"))
 			throw new Error("choose either --rebuild or --repair");
+        if (selectedCanonicalRuntime) {
+            success(command, await executeCatalogCommand("operation", ["projection.rebuild"], config));
+            return;
+        }
 		if (args.includes("--repair")) {
 			const brain = config.brain;
 			if (!brain) throw new Error("brain configuration is unavailable");
@@ -978,108 +1133,102 @@ async function main(): Promise<void> {
 		if (!health.ok) process.exitCode = 1;
 		return;
 	}
-	if (command === "jobs") {
-		const subcommand = args[1];
-		rejectUnknownFlags(args.slice(2), ["--store", "--limit", "--repo", "--id", "--at", "--every-seconds", "--tenant"]);
-		const storePath = option(args, "--store");
-		if (!storePath) throw new Error("jobs commands require --store <pglite-directory>");
-		const tenantId = option(args, "--tenant") ?? "local";
-		const store = await openPgliteBrainStore(storePath);
-		try {
-			if (subcommand === "list") { success(command, { jobs: await listJobs(store, Number(option(args, "--limit") ?? "100"), tenantId) }); return; }
-			if (subcommand === "schedules") { success(command, { schedules: await listJobSchedules(store, tenantId) }); return; }
-			if (subcommand === "cancel") {
-				const id = option(args, "--id");
-				if (!id) throw new Error("jobs cancel requires --id <job-id>");
-				await cancelJob(store, id, tenantId);
-				success(command, { cancelled: id });
-				return;
-			}
-			const root = option(args, "--repo") ?? process.env.MANAS_BRAIN_REPOSITORY;
-			if (!root) throw new Error("jobs index commands require --repo <brain-repository>");
-			if (subcommand === "enqueue-index") { success(command, { job: await enqueueJob(store, { type: "index", payload: { repositoryRoot: root }, tenantId, availableAt: scheduledAt(args) }) }); return; }
-			if (subcommand === "schedule-index") {
-				const intervalSeconds = Number(option(args, "--every-seconds"));
-				if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1) throw new Error("jobs schedule-index requires --every-seconds <positive-integer>");
-				success(command, { schedule: await createJobSchedule(store, { type: "index", payload: { repositoryRoot: root }, tenantId, intervalSeconds, nextRunAt: scheduledAt(args) }) });
-				return;
-			}
-			if (subcommand === "run-one") {
-				const workerId = `cli-${process.pid}`;
-				const runtimeConfig = await loadConfig();
-				const configured = runtimeConfig.providers ?? {};
-				if (configured.embedding && configured.embedding.dimensions === undefined) throw new Error("configured embedding provider dimensions are required");
-					const embeddingDimensions = configured.embedding?.dimensions;
-				const parityHandlers = createParityJobHandlers({
-					store,
-					workerId,
-					tenantId,
-					...(configured.embedding && embeddingDimensions !== undefined ? { embeddingProvider: new OpenAiCompatibleEmbeddingProvider({ id: configured.embedding.model, dimensions: embeddingDimensions }, configured.embedding.endpoint, configured.embedding.apiKey, configured.embedding.privacy) } : {}),
-					...(configured.transcription ? { transcriptionProvider: new OpenAiCompatibleTranscriptionProvider(configured.transcription.model, configured.transcription.endpoint, configured.transcription.apiKey, configured.transcription.privacy) } : {}),
-					...(configured.extraction ? { structuredExtractionProvider: new OpenAiCompatibleStructuredExtractionProvider(configured.extraction.model, configured.extraction.endpoint, configured.extraction.apiKey, configured.extraction.privacy) } : {}),
-				});
-				const handlers = { ...parityHandlers, index: parityHandlers.indexing, projection: parityHandlers["projection-repair"] };
-				const job = await runOneJob(store, workerId, handlers, { tenantId });
-				success(command, { job });
-				return;
-			}
-			throw new Error("usage: jobs list|enqueue-index|schedule-index|schedules|run-one|cancel --store <pglite-directory> [--repo <brain-repository>]");
-		}
-		finally { await store.close(); }
-		return;
-	}
-	if (command === "auth") {
-		const subcommand = args[1];
-		rejectUnknownFlags(args.slice(2), ["--store", "--name", "--scopes", "--id", "--user-id", "--expires-at", "--tenant", "--limit"]);
-		const storePath = option(args, "--store");
-		if (!storePath) throw new Error("auth commands require --store <pglite-directory>");
-		const tenantId = option(args, "--tenant") ?? "local";
-		const store = await openPgliteBrainStore(storePath);
-		try {
-			if (subcommand === "list") { success(command, { tokens: await listPersonalAccessTokens(store, tenantId) }); return; }
-			if (subcommand === "events") { success(command, { events: (await listAuditEvents(store, tenantId, Number(option(args, "--limit") ?? "100"))).map(redactAdminEvent) }); return; }
-			if (subcommand === "revoke") {
-				const id = option(args, "--id");
-				if (!id) throw new Error("auth revoke requires --id <token-id>");
-				await revokePersonalAccessToken(store, id, tenantId);
-				success(command, { revoked: id });
-				return;
-			}
-			if (subcommand === "create") {
-				const name = option(args, "--name");
-				const scopeText = option(args, "--scopes");
-				const userId = option(args, "--user-id");
-				const expiryText = option(args, "--expires-at");
-				if (!name || !scopeText) throw new Error("auth create requires --name <name> --scopes <read,write,admin>");
-				const expiresAt = expiryText ? new Date(expiryText) : undefined;
-				if (expiresAt && Number.isNaN(expiresAt.getTime())) throw new Error("--expires-at must be an ISO timestamp");
-				success(command, await createPersonalAccessToken(store, { name, scopes: scopeText.split(",") as Array<"read" | "write" | "admin">, tenantId, ...(userId ? { userId } : {}), expiresAt }));
-				return;
-			}
-			throw new Error("usage: auth create|list|events|revoke --store <pglite-directory>");
-		} finally { await store.close(); }
-		return;
-	}
+    if (command === "jobs") {
+        const subcommand = args[1];
+        rejectUnknownFlags(args.slice(2), ["--store", "--limit", "--repo", "--id", "--at", "--every-seconds", "--tenant"]);
+        const execute = (name: string, input: Record<string, unknown>) => executeCatalogCommand("operation", [name, "--input", JSON.stringify(input), ...args.slice(2)], config);
+        if (subcommand === "list") { success(command, { jobs: await execute("jobs.list", { limit: Number(option(args, "--limit") ?? "100") }) }); return; }
+        if (subcommand === "schedules") { success(command, { schedules: await execute("jobs.schedules", {}) }); return; }
+        if (subcommand === "cancel") {
+            const id = option(args, "--id");
+            if (!id) throw new Error("jobs cancel requires --id <job-id>");
+            await execute("jobs.cancel", { id });
+            success(command, { cancelled: id }); return;
+        }
+        const root = brainRepository(args).root;
+        if (subcommand === "enqueue-index") {
+            success(command, { job: await execute("jobs.enqueue", { type: "index", payload: { repositoryRoot: root }, availableAt: scheduledAt(args)?.toISOString() }) }); return;
+        }
+        if (subcommand === "schedule-index") {
+            const intervalSeconds = Number(option(args, "--every-seconds"));
+            if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1) throw new Error("jobs schedule-index requires --every-seconds <positive-integer>");
+            success(command, { schedule: await execute("jobs.schedule", { type: "index", payload: { repositoryRoot: root }, intervalSeconds, nextRunAt: scheduledAt(args)?.toISOString() }) }); return;
+        }
+        throw new Error("usage: jobs list|enqueue-index|schedule-index|schedules|run-one|cancel [--store <directory>] [--repo <brain>]");
+    }
+    if (command === "auth") {
+        const subcommand = args[1];
+        rejectUnknownFlags(args.slice(2), ["--store", "--name", "--scopes", "--id", "--user-id", "--expires-at", "--tenant", "--limit", "--repo"]);
+        const execute = (name: string, input: Record<string, unknown>) => executeCatalogCommand("operation", [name, "--input", JSON.stringify(input), ...args.slice(2)], config);
+        if (subcommand === "list") { success(command, { tokens: await execute("admin.token.list", {}) }); return; }
+        if (subcommand === "events") { success(command, { events: await execute("admin.audit", { limit: Number(option(args, "--limit") ?? "100") }) }); return; }
+        if (subcommand === "revoke") {
+            const id = option(args, "--id");
+            if (!id) throw new Error("auth revoke requires --id <token-id>");
+            await execute("admin.token.revoke", { id, confirmation: "admin.token.revoke " + id, idempotencyKey: "cli-token-revoke:" + id });
+            success(command, { revoked: id }); return;
+        }
+        if (subcommand === "create") {
+            const name = option(args, "--name"), scopes = option(args, "--scopes");
+            if (!name || !scopes) throw new Error("auth create requires --name <name> --scopes <read,write,admin>");
+            success(command, await execute("admin.token.create", { name, scopes: scopes.split(","), userId: option(args, "--user-id"), expiresAt: option(args, "--expires-at") })); return;
+        }
+        throw new Error("usage: auth create|list|events|revoke [--store <directory>]");
+    }
 	if (command === "serve") {
-		rejectUnknownFlags(args.slice(1), ["--http-port", "--store"]);
+		rejectUnknownFlags(args.slice(1), ["--http-port", "--store", "--scope", "--visibility", "--client"]);
+		const clientId = option(args, "--client");
+		const clientScope = option(args, "--scope");
+		if (clientId && (clientScope || option(args, "--visibility"))) throw new Error("--client uses its owner-managed grant; omit --scope and --visibility");
+		if (clientScope !== undefined && !["read", "write"].includes(clientScope)) throw new Error("client --scope must be read or write");
+		const clientLabels: unknown = JSON.parse(option(args, "--visibility") ?? "[]");
+		if (!Array.isArray(clientLabels) || clientLabels.some((label) => typeof label !== "string" || !label.trim())) throw new Error("--visibility must be a JSON array of labels");
+		if (option(args, "--visibility") && !clientScope) throw new Error("--visibility requires --scope");
 		const rawPort = option(args, "--http-port");
 		if (rawPort) {
+			if (clientScope || clientId) throw new Error("--scope and --client are for stdio clients; HTTP clients use access tokens");
 			const port = Number(rawPort);
 			const token = process.env.MANAS_MCP_TOKEN;
 			if (!token) throw new Error("MANAS_MCP_TOKEN is required for HTTP MCP");
-			const storePath = option(args, "--store");
-			const store = storePath ? await openPgliteBrainStore(storePath) : undefined;
-			const remoteRoot = process.env.MANAS_BRAIN_REPOSITORY;
-			const operationRegistry = remoteRoot ? operationCatalogModule.createFullOperationRegistry({ repository: new BrainRepository(remoteRoot), ...(store ? { store, controlPlane: new controlPlaneModule.DurableControlPlane(store) } : {}) }) : undefined;
+			const storePath = option(args, "--store") ?? selectedCanonicalRuntime?.storePath;
+			const remoteRoot = process.env.MANAS_BRAIN_REPOSITORY ?? selectedCanonicalRuntime?.repositoryRoot;
+			let proxyRegistry;
+			try { proxyRegistry = await localServiceRegistry(config, remoteRoot); }
+			catch (error) { if (!(error instanceof LocalServiceError) || error.code !== "service_unavailable") throw error; }
+			if (proxyRegistry) {
+				serveMcpHttp(config, {
+					port, token, scopes: mcpScopes(), operationRegistry: proxyRegistry,
+					authorizeToken: async (candidate, scope, tenantId) => await callLocalService(config, "service.authorize-token", { token: candidate, scope, tenantId }) as boolean,
+					principalForToken: async (candidate) => await callLocalService(config, "service.identify-token", { token: candidate }) as { id: string; tenantId: string; userId?: string } | undefined,
+					authorizeOperation: async (principal, definition, input) => await callLocalService(config, "service.authorize-operation", { principal, name: definition.name, input }) as { allowedAccessLabels?: string[] },
+				});
+				await new Promise<void>(() => undefined);
+			}
+			const engine = remoteRoot ? await createBrainEngine({ repositoryRoot: remoteRoot, storePath, config }) : undefined;
+			const store = engine?.store ?? (storePath ? await openPgliteBrainStore(storePath) : undefined);
+			const operationRegistry = engine?.operations;
 		serveMcpHttp(config, { port, token, scopes: mcpScopes(), authorizeToken: store ? (candidate: string, scope: "read" | "write" | "admin", tenantId?: string) => authorizePersonalAccessToken(store, candidate, scope, tenantId ?? "local") : undefined, principalForToken: store ? (candidate: string) => identifyPersonalAccessToken(store, candidate) : undefined, authorizeOperation: store ? hostedOperationAuthorizer(store) : undefined, operationRegistry });
 			await new Promise<void>(() => undefined);
 		}
-		const storePath = option(args, "--store");
-		const store = storePath ? await openPgliteBrainStore(storePath) : undefined;
-		const localRoot = process.env.MANAS_BRAIN_REPOSITORY;
-		const operationRegistry = localRoot ? operationCatalogModule.createFullOperationRegistry({ repository: new BrainRepository(localRoot), ...(store ? { store, controlPlane: new controlPlaneModule.DurableControlPlane(store) } : {}) }) : undefined;
-		try { await serveMcp(config, { operationRegistry }); }
-		finally { await store?.close(); }
+		const storePath = option(args, "--store") ?? selectedCanonicalRuntime?.storePath;
+		const localRoot = process.env.MANAS_BRAIN_REPOSITORY ?? selectedCanonicalRuntime?.repositoryRoot;
+		let operationRegistry;
+		try { operationRegistry = await localServiceRegistry(config, localRoot); }
+		catch (error) { if (!(error instanceof LocalServiceError) || error.code !== "service_unavailable") throw error; }
+		const engine = !operationRegistry && localRoot ? await createBrainEngine({ repositoryRoot: localRoot, storePath, config }) : undefined;
+		operationRegistry ??= engine?.operations;
+		const store = !operationRegistry && storePath ? await openPgliteBrainStore(storePath) : undefined;
+        try {
+        if (clientId) {
+            if (!operationRegistry) throw new Error("managed clients require the canonical operation registry");
+            operationRegistry = await liveClientRegistry(operationRegistry, config.stateRoot, clientId);
+        }
+		if (clientScope) {
+			if (!operationRegistry) throw new Error("scoped clients require the canonical operation registry");
+			operationRegistry = operationRegistryModule.scopedClientRegistry(operationRegistry, { scope: clientScope as "read" | "write", principal: "stdio-client", tenantId: "local", allowedAccessLabels: clientLabels as string[] });
+		}
+		await serveMcp(config, { operationRegistry, catalogOnly: Boolean(clientScope || clientId) }); }
+		finally { await engine?.close(); await store?.close(); }
 		return;
 	}
 	throw new Error(`unknown command: ${command}`);

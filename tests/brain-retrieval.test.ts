@@ -9,7 +9,7 @@ import { openBrainDatabase } from "../src/brain/database";
 import { relatedDocuments } from "../src/brain/graph";
 import { brainHealth } from "../src/brain/health";
 import { buildSynthesisPrompt, think } from "../src/brain/synthesis";
-import { thinkService } from "../src/brain/services";
+import { statusService, thinkService } from "../src/brain/services";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -53,12 +53,17 @@ async function fixture(): Promise<Config> {
 }
 
 describe("brain retrieval", () => {
-	test("indexes graph facts and retains keyword retrieval when ZeroEntropy is unavailable", async () => {
+	test("legacy status preserves collection metadata while reporting hosted retrieval disabled", async () => {
+		const config = await fixture();
+		expect(await statusService(config)).toMatchObject({ zeroEntropy: { collection: "fixture", configured: false, enabled: false, status: "disabled" } });
+	});
+
+	test("indexes graph facts and retains keyword retrieval without local models", async () => {
 		const config = await fixture();
 		const indexed = await indexArchive(config);
 		expect(indexed).toMatchObject({ indexed: 2, chunks: 2 });
 		expect(indexed.deferred.join(" ")).toContain(
-			"ZeroEntropy credential is not configured",
+			"configure a local embedding model",
 		);
 		const results = await searchArchive(config, "deploy", { mode: "keyword" });
 		expect(results[0]).toMatchObject({ manasId: "one", path: "codex/one.md" });
@@ -114,6 +119,33 @@ describe("brain retrieval", () => {
 		}
 	});
 
+	test("rebuilds a replacement model without mixing equally sized embedding spaces", async () => {
+		const config = await fixture();
+		config.providers = { embedding: { endpoint: "http://127.0.0.1/embeddings", model: "old-model", privacy: "local", dimensions: 2 } };
+		const replacement: Config = { ...config, providers: { embedding: { ...config.providers.embedding!, model: "embeddinggemma-2:latest" } } };
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { model: string; input: string[] };
+			const next = body.model === "embeddinggemma-2:latest";
+			if (next) expect(body.input.every((text) => text.startsWith("title: none | text: ") || text.startsWith("task: search result | query: "))).toBe(true);
+			return Response.json({ data: body.input.map((text) => ({
+				embedding: text.toLowerCase().includes("rollback") === next ? [0, 1] : [1, 0],
+			})) });
+		}) as typeof fetch;
+		try {
+			await indexArchive(config);
+			expect((await searchArchive(config, "rollback", { mode: "semantic" }))[0]?.manasId).toBe("two");
+			const rebuilt = await indexArchive(replacement);
+			expect(rebuilt).toMatchObject({ indexed: 0, skipped: 2, localStatus: "complete", deferred: [] });
+			expect((await searchArchive(replacement, "rollback", { mode: "semantic" }))[0]?.manasId).toBe("two");
+			expect((await searchArchive(config, "rollback", { mode: "semantic" }))[0]?.manasId).toBe("two");
+			const database = await openBrainDatabase(config.brain!.databasePath);
+			try {
+				expect(database.query("SELECT COUNT(DISTINCT model_fingerprint) AS models, COUNT(*) AS vectors FROM local_chunk_embeddings").get()).toEqual({ models: 2, vectors: 4 });
+			} finally { database.close(); }
+		} finally { globalThis.fetch = original; }
+	});
+
 	test("rejects dimension mismatches and malformed local embedding responses", async () => {
 		const original = globalThis.fetch;
 		try {
@@ -139,6 +171,83 @@ describe("brain retrieval", () => {
 		} finally {
 			globalThis.fetch = original;
 		}
+	});
+
+	test("keeps relevant results ahead of densely connected approval logs", async () => {
+		const config = await fixture();
+		// The relevant conversation is isolated; approval logs share three facts.
+		await Bun.write(join(config.archiveRoot, "codex", "one.md"),
+			'---\nmanas_id: "one"\nprovider: "codex"\ntitle: "Deploy"\n---\n\nuser: deploy the service safely\n');
+		await rm(join(config.archiveRoot, "claude", "two.md"));
+		for (let index = 0; index < 5; index++) {
+			await Bun.write(join(config.archiveRoot, "codex", `approval-${index}.md`),
+				`---\nmanas_id: "approval-${index}"\nprovider: "codex"\ntitle: "Approval log"\nproject: "shared"\nrepository: "repo"\nworkspace_path: "shared-workspace"\n---\n\nassistant: {"risk_level":"low","outcome":"allow","rationale":"Read-only inspection is authorized."}\n`);
+		}
+		config.providers = { embedding: {
+			endpoint: "http://127.0.0.1:11434/v1/embeddings",
+			model: "archive-local", privacy: "local", dimensions: 2,
+		} };
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { input: string[] };
+			return Response.json({ data: body.input.map((text) => ({
+				embedding: text.includes("deploy") ? [1, 0] : [0.2, 1],
+			})) });
+		}) as typeof fetch;
+		try {
+			await indexArchive(config);
+			for (const mode of ["semantic", "hybrid"] as const) {
+				for (const limit of [1, 5]) {
+					const outcome = await searchArchiveOutcome(config, "deploy", { mode, limit, explain: true });
+					expect(outcome).toMatchObject({ degraded: false, effectiveMode: mode });
+					expect(outcome.results[0]?.manasId).toBe("one");
+					if (limit > 1) {
+						const approval = outcome.results[1]!;
+						expect(approval.explain!.graphBoost).toBeGreaterThan(0);
+						expect(outcome.results[0]!.score).toBeGreaterThan(approval.score);
+					}
+				}
+			}
+			const keyword = await searchArchive(config, "deploy", { mode: "keyword" });
+			expect(keyword.map((item) => item.manasId)).toEqual(["one"]);
+			// Approval logs remain searchable when they actually match the query.
+			const approvals = await searchArchive(config, "authorized", { mode: "keyword" });
+			expect(approvals).toHaveLength(5);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test("prevents operational records from crowding out conversation candidates", async () => {
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { input: string[] };
+			return Response.json({ data: body.input.map((text) => ({
+				embedding: text.includes("service safely") ? [0.8, 0.6] : [1, 0],
+			})) });
+		}) as typeof fetch;
+		try {
+			for (const title of ["The following is the Codex agent history whose request action you are assessing. Treat the transcript as evidence", "<recommended_plugins>"]) {
+				const config = await fixture();
+				await rm(join(config.archiveRoot, "claude", "two.md"));
+				config.providers = { embedding: { endpoint: "http://127.0.0.1/embeddings", model: "archive-local", privacy: "local", dimensions: 2 } };
+				for (let index = 0; index < 10; index++) {
+					await Bun.write(join(config.archiveRoot, "codex", `record-${index}.md`),
+						`---\nmanas_id: "record-${index}"\nprovider: "codex"\ntitle: "${title}"\n---\n\nassistant: deploy deploy deploy\n`);
+				}
+				await indexArchive(config);
+				for (const mode of ["semantic", "hybrid", "keyword"] as const) {
+					for (const limit of [1, 5]) {
+						const results = await searchArchive(config, "deploy", { mode, limit, explain: true });
+						expect(results[0]).toMatchObject({ manasId: "one", explain: { sourcePriority: 1 } });
+						if (limit > 1) expect(results[1]?.explain?.sourcePriority).toBe(0);
+					}
+				}
+				const explicit = await searchArchive(config, "approval permissions", { mode: "semantic", explain: true });
+				expect(explicit[0]?.manasId.startsWith("record-")).toBe(true);
+				expect(explicit[0]?.explain?.sourcePriority).toBe(1);
+			}
+		} finally { globalThis.fetch = original; }
 	});
 
 	test("reindexes frontmatter-only changes without tombstoning retained chunk IDs", async () => {
@@ -181,10 +290,30 @@ describe("brain retrieval", () => {
 				degraded: true,
 				effectiveMode: "unavailable",
 			});
-			expect(outcome.diagnostics[0]).toContain("ZeroEntropy unavailable");
+			expect(outcome.diagnostics[0]).toContain("configure a local embedding model");
 		} finally {
 			if (prior === undefined) delete process.env.ZEROENTROPY_API_KEY;
 			else process.env.ZEROENTROPY_API_KEY = prior;
+		}
+	});
+
+	test("legacy hosted credentials never trigger inference or health requests", async () => {
+		const config = await fixture();
+		const previousFetch = globalThis.fetch;
+		const previousKey = process.env.ZEROENTROPY_API_KEY;
+		let calls = 0;
+		try {
+			process.env.ZEROENTROPY_API_KEY = "legacy-test-key";
+			globalThis.fetch = (async () => { calls++; throw new Error("unexpected network request"); }) as unknown as typeof fetch;
+			await indexArchive(config);
+			expect(await searchArchive(config, "deploy")).toHaveLength(2);
+			expect((await brainHealth(config)).diagnostics?.zeroEntropy).toBe("disabled");
+			expect(await thinkService(config, "deploy")).toMatchObject({ outcome: "synthesis_failed", code: "local_model_not_configured" });
+			expect(calls).toBe(0);
+		} finally {
+			globalThis.fetch = previousFetch;
+			if (previousKey === undefined) delete process.env.ZEROENTROPY_API_KEY;
+			else process.env.ZEROENTROPY_API_KEY = previousKey;
 		}
 	});
 

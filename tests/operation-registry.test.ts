@@ -23,3 +23,20 @@ describe("shared operation registry", () => {
 		expect(() => registry.get("missing")).toThrow("not registered");
 	});
 });
+
+test("repository clients cannot bypass labels through reads, exports, history, or writes", async () => {
+ const pages = [{ id: "public", path: "public.md", accessLabels: [] }, { id: "private", path: "private.md", accessLabels: ["secret"] }];
+ const registry = createBrainRepositoryOperationRegistry({
+  snapshot: async () => ({ brainId: "brain", commit: "head", pages }),
+  readPage: async (_snapshot: unknown, id: string) => ({ id, content: id }),
+  getPage: async (path: string) => ({ path }),
+ } as never);
+ const context = { scope: "write" as const, tenantId: "local", brainId: "brain", allowedAccessLabels: [] };
+ expect(await registry.execute(context, "list_pages", {})).toEqual({ pages: [pages[0]] });
+ expect(await registry.execute(context, "export_brain", {})).toMatchObject({ pages: [{ id: "public" }] });
+ await expect(registry.execute(context, "get_page", { path: "private.md" })).rejects.toThrow("unavailable");
+ await expect(registry.execute(context, "get_page_at", { path: "private.md", ref: "old" })).rejects.toThrow("unavailable");
+ await expect(registry.execute(context, "page_history", { path: "public.md" })).rejects.toThrow("owner history");
+ await expect(registry.execute(context, "put_page", { path: "private.md", content: "replace", expectedHead: "head" })).rejects.toThrow("unavailable");
+ await expect(registry.execute({ ...context, tenantId: "other" }, "list_pages", {})).rejects.toThrow("not authorized");
+});

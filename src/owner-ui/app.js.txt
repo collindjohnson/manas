@@ -1,0 +1,214 @@
+"use strict";
+const $ = (id) => document.getElementById(id);
+let csrf = sessionStorage.getItem("manas-owner-csrf") || "", screen = "overview", generation = 0;
+const labels = (value) => value.split(",").map((item) => item.trim()).filter(Boolean);
+const key = () => crypto.randomUUID();
+const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
+function message(text, error = false) { $("message").textContent = text; $("message").className = error ? "error" : ""; }
+async function api(path, input = {}) {
+ const response = await fetch("/api/" + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Manas-Csrf": csrf }, body: JSON.stringify(input), credentials: "same-origin" });
+ const result = await response.json();
+ if (!result.ok) { if (response.status === 401) { csrf = ""; sessionStorage.removeItem("manas-owner-csrf"); $("connection").textContent = "Owner sign-in required"; } throw new Error(result.error.message + " " + result.error.suggestedFix); }
+ return result.data;
+}
+const op = (operation, input = {}) => api("operation", { operation, input });
+function badge(text) { return el("span", text, "badge " + String(text).replace(/[^a-z]/g, "")); }
+function detail(parent, value, title = "Inspect evidence and receipt") { const node = el("details"); node.append(el("summary", title), el("pre", JSON.stringify(value, null, 2))); parent.append(node); }
+function card(title, description) { const node = el("article", undefined, "card"); node.append(el("h2", title)); if (description) node.append(el("p", description, "muted")); return node; }
+function button(text, action, primary = false) {
+ const node = el("button", text, primary ? "primary" : "");
+ node.type = "button";
+ node.addEventListener("click", async () => { node.disabled = true; try { await action(); } catch (error) { message(error.message, true); } finally { node.disabled = false; } });
+ return node;
+}
+function actions(parent, ...nodes) { const row = el("div", undefined, "actions"); row.append(...nodes); parent.append(row); }
+function field(form, name, label, type = "text", value = "", required = true) {
+ const id = "field-" + key(), wrapper = el("div"), title = el("label", label); title.htmlFor = id;
+ const input = el(type === "textarea" ? "textarea" : "input"); if (type !== "textarea") input.type = type;
+ input.id = id; input.name = name; input.value = value; input.required = required;
+ wrapper.append(title, input); form.append(wrapper); return input;
+}
+function choice(form, name, label, options) {
+ const wrapper = el("div"), title = el("label", label), select = el("select"), id = "field-" + key(); select.id = id; select.name = name; title.htmlFor = id;
+ for (const [value, text] of options) { const option = el("option", text); option.value = value; select.append(option); }
+ wrapper.append(title, select); form.append(wrapper); return select;
+}
+function form(parent, title, submitLabel, configure, submit) {
+ const section = card(title), node = el("form"); configure(node); const send = el("button", submitLabel, "primary"); send.type = "submit"; const row = el("div", undefined, "actions"); row.append(send); node.append(row);
+ let fingerprint = "", requestKey = key();
+ node.addEventListener("submit", async (event) => { event.preventDefault(); send.disabled = true; message("Working…"); try { const values = Object.fromEntries(new FormData(node)), nextFingerprint = JSON.stringify(values); if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; requestKey = key(); } await submit(values, requestKey); } catch (error) { message(error.message, true); } finally { send.disabled = false; } }); section.append(node); parent.append(section); return section;
+}
+async function confirmChange(title, text) {
+ $("confirm-title").textContent = title; $("confirm-description").textContent = text; const dialog = $("confirm-dialog"); dialog.returnValue = ""; dialog.showModal();
+ return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true }));
+}
+function empty(parent, text) { parent.append(card("Nothing to show", text)); }
+function evidence(parent, items) {
+ for (const item of items || []) { const quote = el("blockquote", item.text || "", "excerpt"); parent.append(quote); detail(parent, item.citation || item, "Source citation"); }
+}
+const screens = {
+ overview: ["Overview", "Your canonical brain and what needs attention."],
+ memories: ["Memories", "Recall an assertion, capture something useful, or correct the record."],
+ questions: ["Pinned questions", "Keep useful answers current as their supporting evidence changes."],
+ loops: ["Commitments & reminders", "Review cited commitments and explicitly request local reminders."],
+ meetings: ["Meeting preparation", "Retrieve participants, recent interactions, and outstanding commitments."],
+ sources: ["Sources & setup", "Choose what enters your brain and check local model health."],
+ proposals: ["Proposal review", "Inspect evidence before accepting maintenance changes."],
+ jobs: ["Jobs", "See durable work, failures, and cancellation status."],
+ access: ["Client access", "Owner administration stays separate from agent and device credentials."],
+};
+async function load(next = screen) {
+ screen = next; const request = ++generation, content = $("content"); content.replaceChildren(); message("Loading…");
+ $("heading").textContent = screens[screen][0]; $("description").textContent = screens[screen][1];
+ for (const node of document.querySelectorAll("[data-screen]")) node.setAttribute("aria-current", node.dataset.screen === screen ? "page" : "false");
+ try { await render[screen](content, () => request === generation); if (request === generation) message(""); }
+ catch (error) { if (request === generation) message(error.message, true); }
+}
+const render = {
+ async overview(parent, current) {
+  const [status, reminders, jobs] = await Promise.all([api("status"), op("reminders.list", { limit: 100 }), op("jobs.list", { limit: 20 })]); if (!current()) return;
+  $("brain-id").textContent = status.brainId;
+  const grid = el("div", undefined, "grid");
+  for (const [title, value, note] of [["Documents", status.primaryDocuments, "Git is authoritative"], ["Projection", status.projectionCurrent ? "Current" : "Needs refresh", "Rebuildable retrieval index"], ["Due commitments", reminders.items.length, "Current cited evidence only"]]) { const node = card(title); node.append(el("p", value, "metric"), el("p", note, "muted")); grid.append(node); } parent.append(grid);
+  const models = card("Inference stays local", "Lexical retrieval works without a model. Configure a local generation model for grounded answers and extraction.");
+  for (const provider of status.providers) models.append(el("p", provider.kind + ": " + (provider.configured ? provider.id || "configured" : "not configured")));
+  actions(models, button("Check model health", () => load("sources"))); parent.append(models);
+  const work = card("Recent work"); const items = jobs.jobs || jobs; for (const job of items.slice(0, 5)) { work.append(el("p", job.type + " · " + job.status)); } if (!items.length) work.append(el("p", "No background jobs yet.", "muted")); actions(work, button("Review jobs", () => load("jobs"))); parent.append(work);
+ },
+ async memories(parent) {
+  const results = el("section"); results.setAttribute("aria-label", "Recall results");
+  form(parent, "Recall", "Search memories", (node) => field(node, "query", "Search terms"), async (value, writeKey) => {
+   const data = await op("memory.recall", { query: value.query, limit: 50 }); results.replaceChildren(); if (!data.results.length) empty(results, "No current authorized memory matched.");
+   for (const memory of data.results) {
+    const node = card("Remembered assertion"); node.append(el("p", memory.text, "excerpt")); detail(node, memory.citation, "Source citation");
+    const revision = memory.citation.documentRevision;
+    actions(node, button("Correct", async () => {
+     const edit = form(node, "Correct assertion", "Save correction", (form) => field(form, "text", "Replacement assertion", "textarea", memory.text), async (value, writeKey) => { await op("memory.correct", { id: memory.id, expectedRevision: revision, idempotencyKey: writeKey, text: value.text, provenance: { sourceType: "user" } }); message("Correction saved. Search again to see the current assertion."); edit.remove(); });
+    }), button("Withdraw", async () => {
+     if (!await confirmChange("Withdraw this memory?", "This removes the assertion from ordinary retrieval and derived answers. Explicit owner history still retains it in Git.")) return;
+     await op("memory.forget", { id: memory.id, expectedRevision: revision, idempotencyKey: key(), reason: "Owner withdrawal from browser" }); node.remove(); message("Memory withdrawn.");
+    }), button("Owner history", async () => detail(node, await op("memory.history", { id: memory.id }), "Explicit owner history")));
+    results.append(node);
+   }
+   message(data.results.length + " current memories.");
+  });
+  parent.append(results);
+  form(parent, "Capture a memory", "Remember", (node) => { field(node, "text", "Assertion", "textarea"); field(node, "visibility", "Visibility labels, comma separated", "text", "private", false); }, async (value, writeKey) => {
+   await op("memory.remember", { text: value.text, visibility: labels(value.visibility), provenance: { sourceType: "user" }, idempotencyKey: writeKey }); message("Memory saved with owner provenance.");
+  });
+ },
+ async questions(parent, current) {
+  form(parent, "Pin a useful question", "Pin question", (node) => { field(node, "question", "Question", "textarea"); field(node, "visibility", "Visibility labels", "text", "private", false); }, async (value, writeKey) => { await op("questions.put", { question: value.question, visibility: labels(value.visibility), idempotencyKey: writeKey }); await load(); });
+  const data = await op("questions.list"); if (!current()) return;
+  const items = data.questions || data.pins || data;
+  if (!items.length) empty(parent, "Pin a question to maintain a grounded answer.");
+  for (const item of items) { const node = card(item.question || item.id); node.prepend(badge(item.answer?.freshness || item.freshness || "missing")); if (item.answer?.answer) node.append(el("p", item.answer.answer, "excerpt")); detail(node, item); actions(node, button("Queue refresh", async () => { await op("questions.refresh", { id: item.id }); message("Answer refresh queued. Check Jobs for progress."); })); parent.append(node); }
+ },
+ async loops(parent, current) {
+  const matches = el("section"); matches.setAttribute("aria-label", "Commitment source matches");
+  form(parent, "Track a commitment", "Find supporting evidence", (node) => field(node, "query", "Search your sources"), async (value) => {
+   const found = await op("retrieval.search", { query: value.query, limit: 10, options: { mode: "keyword" } }); matches.replaceChildren();
+   if (!found.results.length) empty(matches, "No current supporting evidence matched.");
+   for (const source of found.results) {
+    const node = card(source.path); evidence(node, [{ text: source.verifiedText, citation: source.citation }]);
+    form(node, "Commitment from this source", "Track commitment", (form) => { field(form, "title", "Commitment"); field(form, "participants", "Participants, comma separated", "text", "", false); field(form, "dueAt", "Due at (optional)", "datetime-local", "", false); }, async (value, writeKey) => {
+     await op("loops.put", { title: value.title, participants: labels(value.participants), ...(value.dueAt ? { dueAt: new Date(value.dueAt).toISOString() } : {}), evidence: [source.citation], idempotencyKey: writeKey }); await load(); message("Commitment saved with the source visibility and citation.");
+    }); matches.append(node);
+   }
+   message(found.results.length + " current source matches.");
+  }); parent.append(matches);
+  const data = await op("loops.list", { limit: 100, includeStale: true }); if (!current()) return;
+  if (!data.items.length) empty(parent, "Find a source above to track your first commitment.");
+  for (const item of data.items) {
+   const node = card(item.title || "Commitment with stale evidence"); node.prepend(badge(item.freshness));
+   node.append(el("p", item.status + (item.dueAt ? " · due " + new Date(item.dueAt).toLocaleString() : "")));
+   evidence(node, item.evidence); detail(node, item);
+   if (item.status === "open") actions(node, button("Mark done", async () => { await op("loops.status", { id: item.id, expectedRevision: item.revision, status: "done", idempotencyKey: key() }); await load(); }), ...(item.dueAt && item.freshness === "current" ? [button("Request local reminder", async () => { await op("reminders.enqueue", { id: item.id, expectedRevision: item.revision }); message("Local reminder requested for the due time."); })] : []));
+   parent.append(node);
+  }
+  const due = await op("reminders.list", { limit: 100 }); if (!current()) return;
+  if (due.items.length) { const node = card("Reminder delivery"); for (const item of due.items) node.append(el("p", item.title + " · " + item.notification.phase)); parent.append(node); }
+ },
+ async meetings(parent) {
+  form(parent, "Prepare a meeting", "Retrieve preparation", (node) => { field(node, "title", "Meeting topic", "text", "", false); field(node, "participants", "Participant names or emails, comma separated", "text", "", false); field(node, "meetingId", "Calendar document ID (optional)", "text", "", false); }, async (value, writeKey) => {
+   const brief = await op("meetings.prepare", { idempotencyKey: writeKey, ...(value.title ? { title: value.title } : {}), participants: labels(value.participants), ...(value.meetingId ? { meetingId: value.meetingId } : {}) });
+   const node = card("Meeting brief"); node.prepend(badge(brief.freshness)); node.append(el("p", brief.outcome));
+   for (const loop of brief.openLoops || []) node.append(el("p", "Open commitment: " + loop.title));
+   evidence(node, brief.evidence); for (const gap of brief.gaps || []) node.append(el("p", gap, "muted")); detail(node, brief); parent.append(node); message("Preparation saved. Evidence is revalidated whenever you retrieve it.");
+  });
+ },
+ async sources(parent, current) {
+  const status = await api("status"); if (!current()) return;
+  if (status.sources.length) {
+   const sourceStatus = card("Canonical source freshness");
+   for (const source of status.sources) sourceStatus.append(el("p", source.type + " · " + source.documents + " documents · latest import: " + (source.lastImportedAt ? new Date(source.lastImportedAt).toLocaleString() : "unknown")));
+   parent.append(sourceStatus);
+  }
+  const setup = card("Local model setup", "Configure providers.generation, embedding, and reranking in your Manas configuration with loopback endpoints and privacy set to local, then restart the service. No hosted inference fallback is used.");
+  actions(setup, button("Check configured endpoints", async () => { const results = await api("models"); const node = card("Model endpoint health"); if (!results.length) node.append(el("p", "No model endpoints configured.")); for (const result of results) { node.append(el("p", result.kind + " · " + result.model + " · " + (result.reachable ? "reachable" : "unavailable"))); if (result.error) node.append(el("p", result.error, "muted")); } parent.prepend(node); })); parent.append(setup);
+  form(parent, "Connect a Google source", "Select account and authorize", (node) => {
+   node.append(el("p", "Read-only access. Select an account, collection boundary, date interval, and visibility before consent. Credentials stay in macOS Keychain."));
+   field(node, "clientFile", "Desktop OAuth client file, absolute path"); field(node, "email", "Google account email", "email"); choice(node, "service", "Source", [["gmail", "Gmail"], ["calendar", "Calendar"], ["contacts", "Contacts"]]);
+   field(node, "collection", "Gmail label IDs, Calendar ID, or Contacts group IDs", "text", "INBOX"); field(node, "after", "From (Gmail and Calendar)", "date", "", false); field(node, "before", "Until (Gmail and Calendar)", "date", "", false); field(node, "visibility", "Private visibility labels", "text", "private");
+  }, async (value, writeKey) => {
+   const common = { service: value.service, visibility: labels(value.visibility) }; let boundary;
+   if (value.service === "gmail") boundary = { ...common, labelIds: labels(value.collection), after: value.after, before: value.before, includeSpamTrash: false };
+   else if (value.service === "calendar") boundary = { ...common, calendarId: value.collection, timeMin: new Date(value.after).toISOString(), timeMax: new Date(value.before).toISOString() };
+   else boundary = { ...common, groupIds: labels(value.collection), allContacts: false };
+   await op("google.accounts.connect", { clientFile: value.clientFile, email: value.email, boundaries: [boundary] }); await load(); message("Account consent and source selection saved.");
+  });
+  const data = await op("google.sources.status"); if (!current()) return;
+  for (const item of data.sources) {
+   const node = card(item.boundary.accountEmail + " · " + item.boundary.service); node.prepend(badge(item.enabled ? item.phase : "disabled"));
+   node.append(el("p", "Last success: " + (item.lastSuccessAt ? new Date(item.lastSuccessAt).toLocaleString() : "Never")));
+   if (item.lastError) node.append(el("p", item.lastError)); detail(node, item);
+   actions(node, button("Sync now", async () => { await op("google.sources.sync", { id: item.id, expectedRevision: item.revision, idempotencyKey: key() }); message("Source sync queued."); }), button(item.enabled ? "Disable ingestion" : "Enable ingestion", async () => { await op("google.sources.enable", { id: item.id, expectedRevision: item.revision, enabled: !item.enabled, idempotencyKey: key() }); await load(); })); parent.append(node);
+  }
+ },
+ async proposals(parent, current) {
+  actions(parent, button("Scan for proposals", async () => { await op("maintenance.scan", {}); message("Maintenance scan queued. Managed writes: see Overview."); }));
+  const data = await op("maintenance.proposals", { limit: 100 }); if (!current()) return;
+  if (!data.items.length) empty(parent, "No maintenance proposals yet.");
+  for (const item of data.items) {
+   const node = card(item.kind); node.prepend(badge(item.status + " · " + item.freshness)); evidence(node, item.evidence); if (item.details) detail(node, item.details, "Proposed change"); detail(node, item.sources, "Supporting revisions");
+   if (item.status === "pending") actions(node, ...(item.kind === "relationship" && item.freshness === "current" ? [button("Accept relationship", async () => { await op("maintenance.accept", { id: item.id, expectedRevision: item.revision, idempotencyKey: key() }); await load(); }, true)] : []), button("Dismiss", async () => { await op("maintenance.dismiss", { id: item.id, expectedRevision: item.revision }); await load(); })); parent.append(node);
+  }
+  const reviews = await op("entities.reviews", { limit: 100 }); if (!current()) return;
+  for (const item of reviews.reviews || []) { const node = card("Entity identity review"); node.prepend(badge(item.status)); detail(node, item, "Inspect proposed identity and candidates"); if (item.status === "pending") actions(node, button("Compare merge candidates", async () => {
+    const candidates = [];
+    for (const candidate of (item.candidates || []).slice(0, 10)) {
+     const found = await op("entities.resolve", { query: candidate.id });
+     const entity = found.entities.find((entry) => entry.id === candidate.id && entry.revision === candidate.revision);
+     if (entity) candidates.push(entity);
+    }
+    if (!candidates.length) { message("No current candidate remains. Refresh the proposal.", true); return; }
+    const comparison = card("Compare identity");
+    comparison.append(el("p", "Proposed: " + item.proposed.name + " · " + item.proposed.entityType));
+    for (const candidate of candidates) { const entry = card(candidate.name, candidate.entityType + " · aliases: " + (candidate.aliases.join(", ") || "none")); detail(entry, candidate.evidence, "Supporting citations"); comparison.append(entry); }
+    form(comparison, "Merge identity", "Merge into selected entity", (form) => choice(form, "targetId", "Existing entity to retain", candidates.map((entry) => [entry.id, entry.name + " · " + entry.entityType])), async (value, writeKey) => {
+     await op("entities.review.resolve", { id: item.id, expectedRevision: item.revision, idempotencyKey: writeKey, decision: "merge", targetId: value.targetId }); await load();
+    }); node.append(comparison);
+   }), button("Keep separate", async () => { await op("entities.review.resolve", { id: item.id, expectedRevision: item.revision, idempotencyKey: key(), decision: "separate" }); await load(); }), button("Reject proposal", async () => { await op("entities.review.resolve", { id: item.id, expectedRevision: item.revision, idempotencyKey: key(), decision: "reject" }); await load(); })); parent.append(node); }
+ },
+ async jobs(parent, current) {
+  const data = await op("jobs.list", { limit: 100 }); if (!current()) return; const items = data.jobs || data;
+  if (!items.length) empty(parent, "No queued work.");
+  for (const item of items) { const node = card(item.type); node.prepend(badge(item.status)); node.append(el("p", "Attempts: " + item.attempts + " / " + item.maxAttempts)); if (item.lastError) node.append(el("p", item.lastError)); detail(node, item, "Execution details"); if (["pending", "running"].includes(item.status)) actions(node, button("Cancel", async () => { await op("jobs.cancel", { id: item.id }); await load(); })); parent.append(node); }
+ },
+ async access(parent, current) {
+  parent.append(card("Agents and devices", "Use manas agents preview/install/status for Codex and Claude Code. Installation, hook trust, and observed execution are reported separately. An agent grant never creates an owner browser session."));
+  const data = await op("admin.token.list"); if (!current()) return; const items = data.tokens || data;
+  if (!items.length) empty(parent, "No client access tokens.");
+  for (const item of items) { const node = card(item.name); node.prepend(badge(item.revokedAt ? "revoked" : "active")); node.append(el("p", "Permissions: " + item.scopes.join(", "))); detail(node, item, "Credential metadata"); if (!item.revokedAt) actions(node, button("Revoke access", async () => { if (!await confirmChange("Revoke " + item.name + "?", "This credential will stop authorizing requests. Other client credentials are unaffected.")) return; await op("admin.token.revoke", { id: item.id, confirmation: "admin.token.revoke " + item.id, idempotencyKey: key() }); await load(); })); parent.append(node); }
+ }
+};
+for (const node of document.querySelectorAll("[data-screen]")) node.addEventListener("click", () => load(node.dataset.screen));
+$("refresh").addEventListener("click", () => load());
+$("logout").addEventListener("click", async () => { try { await api("logout"); } finally { sessionStorage.removeItem("manas-owner-csrf"); location.replace("/"); } });
+(async () => {
+ try {
+  const ticket = new URLSearchParams(location.hash.slice(1)).get("ticket"); history.replaceState(null, "", location.pathname);
+  if (ticket) { const session = await api("login", { ticket }); csrf = session.csrf; sessionStorage.setItem("manas-owner-csrf", csrf); }
+  if (csrf) { await api("status"); $("connection").textContent = "Owner workspace · local"; $("logout").hidden = false; $("refresh").hidden = false; await load(); }
+ } catch (error) { message(error.message, true); }
+})();

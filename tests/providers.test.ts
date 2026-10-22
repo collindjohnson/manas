@@ -13,6 +13,25 @@ describe("OpenAI-compatible embedding provider", () => {
 		} finally { globalThis.fetch = original; }
 	});
 
+	test("uses distinct EmbeddingGemma-2 retrieval prompts and fingerprints", async () => {
+		const inputs: string[][] = [];
+		const fetcher = (async (_input, init) => {
+			const body = JSON.parse(String(init?.body));
+			inputs.push(body.input);
+			return Response.json({ data: body.input.map(() => ({ embedding: [1, 0] })) });
+		}) as typeof fetch;
+		const provider = new OpenAiCompatibleEmbeddingProvider({ id: "embeddinggemma-2:latest", dimensions: 2 }, "http://127.0.0.1/embeddings", undefined, "local", { fetcher });
+		await provider.embed(["a document"]);
+		await provider.embed(["a question"], "query");
+		expect(inputs).toEqual([["title: none | text: a document"], ["task: search result | query: a question"]]);
+		const descriptor = { kind: "embedding" as const, provider: "openai-compatible", model: "embeddinggemma-2:latest", dimensions: 2, privacy: "local" as const };
+		expect(provider.model.fingerprint).toBe(modelFingerprint({ ...descriptor, templateVersion: "embeddinggemma-retrieval-v1" }));
+		expect(provider.model.fingerprint).not.toBe(modelFingerprint(descriptor));
+		const generic = new OpenAiCompatibleEmbeddingProvider({ id: "other-model", dimensions: 2 }, "http://127.0.0.1/embeddings", undefined, "local", { fetcher });
+		await generic.embed(["unchanged"], "query");
+		expect(inputs.at(-1)).toEqual(["unchanged"]);
+	});
+
 	test("keeps streaming provider response bodies readable after headers arrive", async () => {
 		const encoder = new TextEncoder();
 		const fetcher = (async (_input, init) => new Response(new ReadableStream<Uint8Array>({
@@ -60,6 +79,18 @@ describe("OpenAI-compatible embedding provider", () => {
 		} finally { globalThis.fetch = original; }
 		expect(() => new OpenAiCompatibleGenerationProvider("local-generator", "https://example.invalid/generate")).toThrow("explicitly configure hosted mode");
 	});
+
+ test("structured generation requests JSON mode without changing ordinary text requests", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const provider = new OpenAiCompatibleGenerationProvider("local-json", "http://127.0.0.1/generate", undefined, "local", {}, { fetcher: async (_input: unknown, init?: RequestInit) => {
+   requests.push(JSON.parse(String(init?.body)));
+   return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }));
+  } });
+  await provider.generate("Return JSON", { format: "json" });
+  await provider.generate("Return text");
+  expect(requests[0]).toMatchObject({ response_format: { type: "json_object" } });
+  expect(requests[1]).not.toHaveProperty("response_format");
+ });
 
 	test("fingerprints non-embedding local models by complete execution semantics", () => {
 		const base = { kind: "generation" as const, provider: "openai-compatible", model: "local", privacy: "local" as const };
@@ -149,4 +180,29 @@ describe("OpenAI-compatible embedding provider", () => {
 		await expect(extraction.extract("timeout", { type: "object" })).rejects.toThrow("timed out");
 		expect(() => new OpenAiCompatibleEmbeddingProvider({ id: "local", dimensions: 2 }, "http://127.0.0.1/embeddings", undefined, "local", { timeoutMs: 0 })).toThrow("timeout");
 	});
+});
+
+test("provider deadlines include stalled response bodies and cancel every reader", async () => {
+ let cancellations = 0;
+ const fetcher = (async () => new Response(new ReadableStream<Uint8Array>({
+  start(controller) { controller.enqueue(new TextEncoder().encode("{")); },
+  cancel() { cancellations++; },
+ }))) as unknown as typeof fetch;
+ const options = { timeoutMs: 5, fetcher };
+ const calls = [
+  () => new OpenAiCompatibleEmbeddingProvider({ id: "local", dimensions: 2 }, "http://127.0.0.1/model", undefined, "local", options).embed(["fixture"]),
+  () => new OpenAiCompatibleGenerationProvider("local", "http://127.0.0.1/model", undefined, "local", {}, options).generate("fixture"),
+  () => new OpenAiCompatibleRerankerProvider("local", "http://127.0.0.1/model", undefined, "local", {}, options).rerank("fixture", [{ id: "a", text: "fixture" }]),
+  () => new OpenAiCompatibleTranscriptionProvider("local", "http://127.0.0.1/model", undefined, "local", {}, options).transcribe(new Uint8Array([1])),
+  () => new OpenAiCompatibleStructuredExtractionProvider("local", "http://127.0.0.1/model", undefined, "local", {}, options).extract("fixture", { type: "object" }),
+ ];
+ for (const invoke of calls) await expect(invoke()).rejects.toThrow("timed out");
+ expect(cancellations).toBe(5);
+});
+
+test("oversized provider bodies are rejected and cancelled before JSON parsing", async () => {
+ let cancelled = false;
+ const fetcher = (async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(16 * 1024 * 1024 + 1)); }, cancel() { cancelled = true; } }))) as unknown as typeof fetch;
+ await expect(new OpenAiCompatibleGenerationProvider("local", "http://127.0.0.1/model", undefined, "local", {}, { fetcher }).generate("fixture")).rejects.toThrow("exceeded 16 MiB");
+ expect(cancelled).toBe(true);
 });

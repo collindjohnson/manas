@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T00:24:39.859Z",
+  "model": "qwen3.8:27b",
+  "providerFingerprint": "3cbd83918f54cdc77e80ab3d74216bb5bcff2fee708d797c124f3b2b8490bc94",
+  "endpoint": "http://127.0.0.1:11434",
+  "isolated": true,
+  "cases": [
+    {
+      "question": "Who is the Juniper project owner?",
+      "outcome": "answered",
+      "answer": "The Juniper project owner is Maya.",
+      "citations": 1,
+      "latencyMs": 21632,
+      "passed": true
+    },
+    {
+      "question": "Which database does Cobalt use for its durable queue?",
+      "outcome": "answered",
+      "answer": "Cobalt uses SQLite for its durable queue.",
+      "citations": 1,
+      "latencyMs": 10938,
+      "passed": true
+    },
+    {
+      "question": "Who is the Orchid release owner?",
+      "outcome": "answered",
+      "answer": "The Orchid release owner is Sam.",
+      "citations": 1,
+      "latencyMs": 15485,
+      "passed": true
+    },
+    {
+      "question": "Where is the Quartz launch location?",
+      "outcome": "insufficient_evidence",
+      "answer": "",
+      "citations": 0,
+      "latencyMs": 11321,
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "limitations": "Four synthetic cases; phrase checks and production citation verification, not a general semantic grounding or quality estimate. First request includes model load. Latency includes retrieval and receipt persistence.",
+  "seedFixtureHash": "0b3198720837d3d1211a06359e4bf88ae0d8023b625e04b0ba9db7d52e47e1cb"
+}

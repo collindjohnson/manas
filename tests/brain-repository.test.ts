@@ -22,6 +22,26 @@ async function fixture() {
 }
 
 describe("brain repository", () => {
+ test("preserves managed bytes without invoking filters or consuming unrelated staged work", async () => {
+  const brain = await fixture();
+  await writeFile(join(brain.root, ".gitattributes"), "* text eol=lf filter=blocked ident working-tree-encoding=UTF-16LE\n");
+  await execFile("git", ["-C", brain.root, "config", "filter.blocked.clean", "false"]);
+  await execFile("git", ["-C", brain.root, "config", "filter.blocked.required", "true"]);
+  await writeFile(join(brain.root, ".git", "info", "attributes"), "unrelated.txt -text -filter -ident -working-tree-encoding\n");
+  await writeFile(join(brain.root, "unrelated.txt"), "staged draft");
+  await execFile("git", ["-C", brain.root, "add", "unrelated.txt"]);
+  const path = "notes/literal[1] café.md";
+  const original = "Owner CRLF $Id$ assertion.\r\n";
+  const created = await brain.putPage(path, original);
+  expect((await brain.verify()).valid).toBe(true);
+  expect((await brain.readPage(await brain.snapshot(), created.id)).content).toBe(original);
+  const updated = await brain.putPage(path, original + "More.\r\n", created.revision);
+  expect((await brain.readPage(await brain.snapshot(), updated.id)).content).toBe(original + "More.\r\n");
+  const staged = (await execFile("git", ["-C", brain.root, "diff", "--cached", "--name-only"])).stdout;
+  expect(staged.trim()).toBe("unrelated.txt");
+  expect(await readFile(join(brain.root, ".git", "info", "attributes"), "utf8")).toStartWith("unrelated.txt -text -filter -ident -working-tree-encoding\n");
+ });
+
 	test("initializes a separate Git repository with the standard directories", async () => {
 		const brain = await fixture();
 		for (const directory of DEFAULT_BRAIN_DIRECTORIES) expect((await lstat(join(brain.root, directory))).isDirectory()).toBe(true);

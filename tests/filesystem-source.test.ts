@@ -21,6 +21,33 @@ describe("filesystem source adapter", () => {
 		expect(first.map((item: any) => item.externalId)).toEqual(second.map((item: any) => item.externalId));
 		expect(first[1]?.content).toContain("plain text");
 		expect(new FilesystemSourceAdapter(root).describe()).toMatchObject({ kind: "filesystem", version: "1" });
-		expect(await Array.fromAsync(new FilesystemSourceAdapter(root).scan({ updatedAt: "9999-01-01T00:00:00.000Z" }))).toEqual([]);
+		expect(await Array.fromAsync(new FilesystemSourceAdapter(root).scan({ updatedAt: "9999-01-01T00:00:00.000Z" }))).toHaveLength(2);
 	});
+});
+
+test("fingerprint checkpoints include late files and same-timestamp edits, and reconcile legacy cursors", async () => {
+ const { utimes } = await import("node:fs/promises");
+ const root = await mkdtemp(join(tmpdir(), "brain-source-cursor-")); roots.push(root);
+ const old = new Date("2020-01-01T00:00:00Z");
+ await writeFile(join(root, "one.md"), "original"); await utimes(join(root, "one.md"), old, old);
+ const adapter = new FilesystemSourceAdapter(root);
+ expect(await Array.fromAsync(adapter.scan({ updatedAt: "2099-01-01T00:00:00Z" }))).toHaveLength(1);
+ const checkpoint = adapter.checkpoint();
+ expect(await Array.fromAsync(new FilesystemSourceAdapter(root).scan(checkpoint))).toEqual([]);
+ await writeFile(join(root, "one.md"), "edited"); await utimes(join(root, "one.md"), old, old);
+ await writeFile(join(root, "late.md"), "late"); await utimes(join(root, "late.md"), old, old);
+ expect((await Array.fromAsync(adapter.scan(checkpoint))).map((item: any) => item.content).sort()).toEqual(["edited", "late"]);
+ expect(await Array.fromAsync(adapter.scan(adapter.checkpoint()))).toEqual([]);
+ expect(await Array.fromAsync(adapter.scan({ cursor: "unrecognized" }))).toHaveLength(2);
+});
+
+test("an interrupted scan does not publish an incomplete fingerprint cursor", async () => {
+ const root = await mkdtemp(join(tmpdir(), "brain-source-interrupted-")); roots.push(root);
+ await writeFile(join(root, "one.md"), "one"); await writeFile(join(root, "two.md"), "two");
+ const adapter = new FilesystemSourceAdapter(root);
+ const scan = adapter.scan();
+ expect((await scan.next()).done).toBe(false);
+ await scan.return(undefined);
+ expect(adapter.checkpoint().cursor).toBeUndefined();
+ expect(await Array.fromAsync(adapter.scan(adapter.checkpoint()))).toHaveLength(2);
 });

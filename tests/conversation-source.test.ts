@@ -22,3 +22,15 @@ describe("conversation source adapter", () => {
 		expect(adapter.checkpoint().updatedAt).toBeString();
 	});
 });
+
+test("session cursors reconcile late records and same-timestamp edits without repeat delivery", async () => {
+ const records = [{ provider: "codex", sourceId: "first", sourcePath: "first.jsonl", updatedAt: "2024-01-01T00:00:00Z", messages: [{ role: "user" as const, text: "original" }] }];
+ const adapter = new ConversationSourceAdapter("codex", async () => records);
+ expect(await Array.fromAsync(adapter.scan({ updatedAt: "2026-01-01T00:00:00Z" }))).toHaveLength(1);
+ const checkpoint = adapter.checkpoint();
+ expect(await Array.fromAsync(adapter.scan(checkpoint))).toEqual([]);
+ records.push({ ...records[0]!, sourceId: "late" });
+ records[0]!.messages[0]!.text = "edited";
+ expect((await Array.fromAsync(adapter.scan(checkpoint))).map((document) => (document as { externalId: string }).externalId)).toEqual(["first", "late"]);
+ expect(await Array.fromAsync(adapter.scan(adapter.checkpoint()))).toEqual([]);
+});

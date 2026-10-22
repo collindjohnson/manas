@@ -1,14 +1,12 @@
+import { applyArchiveMigration, previewArchiveMigration, readArchiveMigration } from "./archive-migration";
 import { homedir } from "node:os";
 import * as verifyModule from "./report";
 import * as archiveModule from "./archive";
 import * as agentModule from "./launch-agent";
-import { access, chmod, copyFile, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
-import { execFile as execFileCallback } from "node:child_process";
 
-const execFile = promisify(execFileCallback);
 const slash = String.fromCharCode(47);
 export async function preflightChatHistorySyncMigration(configPath: string): Promise<Record<string, unknown>> {
 	const home = homedir();
@@ -81,10 +79,6 @@ function safeRelative(root: string, path: string): string {
 	const value = relative(root, path).split(sep).join(slash);
 	if (!value || value.startsWith("..") || value === ".git" || value.startsWith(`.git${slash}`) || value === ".brain" || value.startsWith(`.brain${slash}`)) throw new Error("invalid legacy archive path");
 	return value;
-}
-
-async function git(root: string, args: string[]): Promise<string> {
-	return (await execFile("git", ["-C", root, ...args])).stdout.trim();
 }
 
 export async function reconcileLegacyArchive(source: string, target: string): Promise<MigrationReconciliationReport> {
@@ -170,47 +164,27 @@ export async function runRollbackDrill(actions: RollbackDrillActions, options: {
 	return { passed: true, steps, legacyRetained: options.legacyRetained, completedAt: (options.now ?? new Date()).toISOString() };
 }
 
-export async function migrateLegacyArchive(source: string, repository: RepositoryLike): Promise<{ copied: number; documents: number; commit: string }> {
-	const sourceRoot = resolve(source);
-	const targetRoot = resolve(repository.root);
-	if (sourceRoot === targetRoot || targetRoot.startsWith(`${sourceRoot}${sep}`)) throw new Error("brain repository must be separate from legacy archive");
-	await repository.initialize();
-	const files: string[] = [];
-	const visit = async (directory: string): Promise<void> => {
-		for (const entry of await readdir(directory, { withFileTypes: true })) {
-			const path = join(directory, entry.name);
-			if (entry.isSymbolicLink()) throw new Error("legacy archive contains a symlink");
-			if (entry.isDirectory()) { if (entry.name !== ".git" && entry.name !== ".brain") await visit(path); continue; }
-			if (entry.isFile()) files.push(path);
-		}
-	};
-	await visit(sourceRoot);
-	for (const sourcePath of files) {
-		const targetPath = join(targetRoot, safeRelative(sourceRoot, sourcePath));
-		try {
-			await lstat(targetPath);
-			throw new Error("legacy migration target path already exists");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
+export async function migrateLegacyArchive(source: string, repository: RepositoryLike, options: { stateRoot?: string; receiptId?: string } = {}): Promise<{ copied: number; documents: number; commit: string; migrationId: string }> {
+	const stateRoot = options.stateRoot ?? join(dirname(resolve(repository.root)), ".manas-migration-state");
+	const receipt = options.receiptId ? await readArchiveMigration(stateRoot, options.receiptId) : await previewArchiveMigration(source, repository.root, stateRoot);
+	const { realpath } = await import("node:fs/promises");
+	if (receipt.source !== await realpath(resolve(source)) || receipt.target !== await canonicalMigrationTarget(repository.root)) throw new Error("migration receipt does not match the selected source and target");
+	try {
+		const result = await applyArchiveMigration(stateRoot, receipt.id);
+		if (!result.commit) throw new Error("migration did not produce a verified commit");
+		return { copied: result.files.length, documents: result.files.filter((file) => file.id).length, commit: result.commit, migrationId: result.id };
+	} catch (error) {
+		if (error instanceof Error && typeof (error as Error & { code?: unknown }).code === "string") throw error;
+		if (error instanceof Error) throw Object.assign(error, { code: "migration_incomplete", retryable: false, suggestedFix: "Inspect migration status --id " + receipt.id + "; preserve any reported source or target edits, then resume with migration resume --id " + receipt.id + "." });
+		throw error;
 	}
-	const manifest: Array<{ id: string; path: string; contentHash: string; revision: string }> = [];
-	for (const sourcePath of files.sort()) {
-		const path = safeRelative(sourceRoot, sourcePath);
-		const targetPath = join(targetRoot, path);
-		await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
-		await copyFile(sourcePath, targetPath);
-		await chmod(targetPath, 0o600);
-		if (path.endsWith(".md")) {
-			const content = await readFile(sourcePath);
-			const contentHash = hash(content);
-			manifest.push({ id: pageId(content.toString("utf8")), path, contentHash, revision: contentHash });
-		}
+}
+async function canonicalMigrationTarget(path: string): Promise<string> {
+	const { realpath } = await import("node:fs/promises");
+	try { return await realpath(resolve(path)); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		const parent = dirname(resolve(path));
+		return join(await canonicalMigrationTarget(parent), relative(parent, resolve(path)));
 	}
-	const manifestPath = join(targetRoot, ".brain", "manifest.jsonl");
-	await writeFile(manifestPath, manifest.map((item) => JSON.stringify(item)).join("\n") + (manifest.length ? "\n" : ""), { mode: 0o600 });
-	const ownedPaths = [...files.map((path) => safeRelative(sourceRoot, path)), join(".brain", "identity.json"), join(".brain", "settings.json"), join(".brain", "manifest.jsonl")];
-	await git(targetRoot, ["add", "--", ...ownedPaths]);
-	await git(targetRoot, ["commit", "--only", "-m", "brain: import legacy archive", "--", ...ownedPaths]);
-	return { copied: files.length, documents: manifest.length, commit: await git(targetRoot, ["rev-parse", "HEAD"]) };
 }

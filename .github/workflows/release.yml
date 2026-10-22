@@ -48,6 +48,8 @@ jobs:
           codesign --force --sign - "$ARTIFACT"
           codesign --verify --strict --verbose=2 "$ARTIFACT"
           if [ "${{ matrix.target }}" = "darwin-arm64" ]; then lipo -archs "$ARTIFACT" | grep -qx arm64; else lipo -archs "$ARTIFACT" | grep -qx x86_64; fi
+      - name: Verify canonical persistence on the native architecture
+        run: bun run scripts/verify-release-runtime.ts --target "${{ matrix.target }}" --require-target
       - name: Verify the standalone binary from a fresh home
         run: |
           FRESH_HOME="$(mktemp -d)"

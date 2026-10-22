@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T02:08:09.353Z",
+  "agent": "codex",
+  "nativeVersion": "codex-cli 0.163.0",
+  "isolated": true,
+  "persistentConfigurationChanged": false,
+  "persistentHookTrustChanged": false,
+  "hookTrustMode": "one-run-reviewed-source-override",
+  "inheritedHookHashes": [
+    "2ac8115359ff849cd61e450574b371f6732780a63a07ad87c00448db5c20362d",
+    "3c10ef1b0bdd1dd47fc1e8b938fe650ad9bbbf9dd434c96a6903776908e892a2"
+  ],
+  "transientlyApprovedTools": [
+    "memory.remember",
+    "memory.recall"
+  ],
+  "checks": [
+    {
+      "name": "prompt-hook-cited-context",
+      "passed": true,
+      "delivered": true,
+      "matchingSession": true,
+      "exactCitation": true,
+      "noToolCalls": true,
+      "excludedPrivateEvidence": true,
+      "latencyMs": 7494
+    },
+    {
+      "name": "native-stop-background-capture",
+      "passed": true,
+      "queued": true,
+      "memories": 1,
+      "latencyMs": 26009
+    },
+    {
+      "name": "authorized-mcp-capture-and-replay",
+      "passed": true,
+      "replayVerified": true,
+      "recallVerified": true,
+      "memories": 1,
+      "latencyMs": 22029
+    }
+  ],
+  "passed": true,
+  "limitations": "Synthetic native exec sessions with transient configuration and existing account authentication. Hook verification uses the documented one-run trust override after source review; it does not establish persistent installation trust. Automatic Stop capture is checked only when --run-native-capture is selected."
+}

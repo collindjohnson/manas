@@ -1,12 +1,13 @@
 import * as coverageModule from "./analytics";
 import { createHash } from "node:crypto";
+import type { EmbeddingProvider } from "@manas-brain-providers";
 
 type Store = {
 	query<T extends Record<string, unknown>>(sql: string, parameters?: Array<string | number | boolean | null | Uint8Array>): Promise<T[]>;
 	exec(sql: string): Promise<void>;
 };
 
-type Provider = { model: { id: string; dimensions: number; fingerprint?: string }; embed(texts: string[]): Promise<number[][]> };
+type Provider = EmbeddingProvider;
 type EmbeddingScope = { tenantId: string; brainId: string; allowedAccessLabels?: string[] };
 
 function vectorLiteral(vector: number[]): string {
@@ -28,7 +29,7 @@ export async function indexLocalEmbeddings(store: Store, provider: Provider, bat
 	let embedded = 0;
 	for (let start = 0; start < rows.length; start += batchSize) {
 		const batch = rows.slice(start, start + batchSize);
-		const vectors = await provider.embed(batch.map((item) => item.text));
+		const vectors = await provider.embed(batch.map((item) => item.text), "document");
 		if (vectors.length !== batch.length) throw new Error("embedding provider returned an invalid batch");
 		for (const [index, row] of batch.entries()) {
 			const vector = vectors[index]!;
@@ -49,7 +50,7 @@ export async function indexLocalEmbeddings(store: Store, provider: Provider, bat
 
 export async function semanticSearch(store: Store, provider: Provider, query: string, limit = 20, scope: EmbeddingScope = { tenantId: "local", brainId: "local" }): Promise<Array<{ id: string; document_id: string; path: string; text: string; distance: number }>> {
 	if (!scope.tenantId.trim() || !scope.brainId.trim()) throw new Error("invalid embedding scope");
-	const [vector] = await provider.embed([query]);
+	const [vector] = await provider.embed([query], "query");
 	if (!vector || vector.length !== provider.model.dimensions) throw new Error("embedding provider returned an invalid vector");
 	return store.query(
 		"SELECT c.id, c.document_id, d.path, c.text, e.embedding <=> $1::vector AS distance FROM brain_chunk_embeddings e JOIN brain_chunks c ON c.id = e.chunk_id JOIN brain_documents d ON d.id = c.document_id WHERE d.tenant_id = $4 AND d.brain_id = $5 AND e.tenant_id = $4 AND e.brain_id = $5 AND d.deleted_at IS NULL AND ($6::jsonb IS NULL OR d.access_labels <@ $6::jsonb) AND e.model_fingerprint = $2 ORDER BY e.embedding <=> $1::vector, d.path LIMIT $3",

@@ -1,3 +1,33 @@
+import { isOwnerMetadataOperation } from "./operation-registry";
+import { expandLocalQuery } from "./hybrid";
+import { RUNTIME_OPERATION_CATALOG, executeRuntimeOperation } from "./runtime-operations";
+import { LOCAL_INGESTION_CATALOG, executeLocalIngestion } from "./local-ingestion";
+import { enqueueReminder, listReminders } from "./reminders";
+import { prepareMeeting, getMeetingPreparation } from "./meeting-preparation";
+import { putOpenLoop, setOpenLoopStatus, getOpenLoop, listOpenLoops } from "./open-loops";
+import { isPrimaryEvidence } from "./evidence-contract";
+import { applyRelationshipProposal } from "./maintenance-approval";
+import { maintenanceProposals, dismissMaintenanceProposal } from "./maintenance-scan";
+import { startExecution, executionStatus, listExecutions, cancelExecution } from "./catalog-execution";
+import { ingestConversation } from "./conversation-ingestion";
+import { RUNTIME_BACKUP_CATALOG, runtimeBackupOperations } from "../runtime-backup";
+import type { Config } from "../config";
+import { GoogleApiError } from "../sources/google-api";
+import { connectGoogleAccount } from "./google-setup";
+import type { authorizeGoogleAccount } from "../sources/google-authorization";
+import type { GoogleCredential } from "../sources/google-oauth";
+import { addGoogleSource, googleSourceStatus, enqueueGoogleSync, setGoogleSourceEnabled, scheduleGoogleSource } from "./google-jobs";
+import type { GoogleCredentialAccess } from "../sources/google-account-client";
+import type { GoogleBoundary } from "../sources/google-pages";
+import { putEntity, putRelationship, resolveEntity, queryRelationships, entityReviews, resolveEntityReview } from "./entity-relationships";
+import { createAnswer, getAnswer, definePin, pinStatus, enqueuePinRefresh, answerFeedback, resetAnswerFeedback } from "./maintained-answers";
+import { enqueueClaudeTranscript, type ClaudeTranscriptInput } from "./claude-transcript-capture";
+import { stageCaptureTurn, enqueueCaptureTurn, type CaptureTurn } from "./memory-capture";
+import { deliverContext } from "./context-delivery";
+import { remember, recall, correct, forget, memoryHistory, memoryIsActive, type MemoryWriteInput, type MemoryCorrectInput, type MemoryForgetInput } from "./memory";
+import { parseFrontmatter } from "../archive";
+import { validateSearchOptions } from "./search";
+import type { SearchOptions } from "../model";
 import type { BrainStore } from "./store";
 import type { DurableControlPlane } from "./control-plane";
 import { createPinnedSkillRegistry } from "../skills";
@@ -6,14 +36,19 @@ import { diagnoseProvider } from "./providers";
 import { createJobSchedule, enqueueJob, listJobSchedules, listJobs, cancelJob } from "./jobs";
 import { createPersonalAccessToken, listPersonalAccessTokens, revokePersonalAccessToken } from "./access-tokens";
 import { DurableAdminActionService } from "./admin";
-import { searchVerifiedHybridBrainRepository } from "./pglite-indexer";
-import { buildReasonedAnswer } from "./reasoning";
+import { ensureCurrentBrainProjection, indexBrainRepository, searchVerifiedHybridBrainRepository, relatedBrainPages } from "./pglite-indexer";
 import { analyzeCodeDocument, brainstormIdeas, buildScorecard, buildTrajectory, calibrateConfidence, captureContributorQuery, detectAnomalies, diagnoseRetrieval, forgetMemory, linkDocumentation, recallMemories, replayEvaluation, routeMultiBrainQuery, routeMultiSourceQuery } from "./advanced";
 import { discoverAdvancedFeatures, proposeSelfMaintenance, runAdvancedEvaluation } from "./advanced-evaluation";
 import { createBrainRepositoryOperationRegistry, OperationRegistry, type JsonSchema, type OperationContext } from "./operation-registry";
 import { brainRepositoryOperationNames } from "./operations";
 
 export interface CatalogDependencies {
+ backupConfig?: Config;
+ googleCredentials?: GoogleCredentialAccess & { put?: (credential: GoogleCredential) => Promise<void> };
+ googleAuthorization?: typeof authorizeGoogleAccount;
+	transcriptionProvider?: import("./providers").TranscriptionProvider;
+	stateRoot?: string;
+	generationProvider?: { generate(prompt: string): Promise<string> };
 	repository: Parameters<typeof createBrainRepositoryOperationRegistry>[0];
 	store?: BrainStore;
 	controlPlane?: DurableControlPlane;
@@ -23,14 +58,65 @@ export interface CatalogDependencies {
 }
 
 export const CONTROL_OPERATION_CATALOG = [
-	{ name: "retrieval.search", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["query"], properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false } },
+ ...RUNTIME_BACKUP_CATALOG,
+ ...LOCAL_INGESTION_CATALOG,
+ ...RUNTIME_OPERATION_CATALOG,
+ { name: "reminders.enqueue", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision"], properties: { id: { type: "string" }, expectedRevision: { type: "string" } }, additionalProperties: false } },
+ { name: "reminders.list", scope: "read", boundary: "remote-safe", schema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 }, after: { type: "string" } }, additionalProperties: false } },
+ { name: "meetings.prepare", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["idempotencyKey"], properties: { idempotencyKey: { type: "string" }, meetingId: { type: "string" }, title: { type: "string" }, participants: { type: "array", items: { type: "string" }, maxItems: 8 }, since: { type: "string" }, maximumEvidence: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false } },
+ { name: "meetings.get", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["id"], properties: { id: { type: "string" } }, additionalProperties: false } },
+ { name: "loops.put", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["title", "evidence", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" }, title: { type: "string" }, participants: { type: "array", items: { type: "string" } }, dueAt: { type: "string" }, evidence: { type: "array", items: { type: "object" } }, visibility: { type: "array", items: { type: "string" } } }, additionalProperties: false } },
+ { name: "loops.status", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["id", "expectedRevision", "status", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" }, status: { type: "string", enum: ["open", "done", "cancelled"] } }, additionalProperties: false } },
+ { name: "loops.get", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["id"], properties: { id: { type: "string" } }, additionalProperties: false } },
+ { name: "loops.list", scope: "read", boundary: "remote-safe", schema: { type: "object", properties: { status: { type: "string", enum: ["open", "done", "cancelled"] }, participant: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, after: { type: "string" }, includeStale: { type: "boolean" } }, additionalProperties: false } },
+
+ {"name":"execution.start","scope":"admin","boundary":"local-only","schema":{"type":"object","required":["idempotencyKey","steps"],"properties":{"idempotencyKey":{"type":"string"},"steps":{"type":"array","items":{"type":"object"}},"budget":{"type":"object"}},"additionalProperties":false}},
+ {"name":"execution.status","scope":"admin","boundary":"local-only","schema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"includeHistoricalResults":{"type":"boolean"}},"additionalProperties":false}},
+ {"name":"execution.list","scope":"admin","boundary":"local-only","schema":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":100},"before":{"type":"string"}},"additionalProperties":false}},
+ {"name":"execution.cancel","scope":"admin","boundary":"local-only","schema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}},"additionalProperties":false}},
+ { name: "sources.conversation.ingest", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["conversation"], properties: { conversation: { type: "object" }, dryRun: { type: "boolean" } }, additionalProperties: false } },
+ { name: "google.accounts.connect", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["clientFile", "email", "boundaries"], properties: { clientFile: { type: "string" }, email: { type: "string" }, boundaries: { type: "array", items: { type: "object" } } }, additionalProperties: false } },
+
+ { name: "google.sources.add", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["boundary"], properties: { boundary: { type: "object" } }, additionalProperties: false } },
+ { name: "google.sources.enable", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision", "enabled", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, enabled: { type: "boolean" }, idempotencyKey: { type: "string" } }, additionalProperties: false } },
+ { name: "google.sources.schedule", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision", "intervalSeconds", "enabled", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, intervalSeconds: { type: "integer", minimum: 60, maximum: 86400 }, enabled: { type: "boolean" }, idempotencyKey: { type: "string" }, maximumPages: { type: "integer", minimum: 1, maximum: 1000 }, runImmediately: { type: "boolean" } }, additionalProperties: false } },
+ { name: "google.sources.status", scope: "admin", boundary: "local-only", schema: { type: "object", properties: {}, additionalProperties: false } },
+ { name: "google.sources.sync", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" }, maximumPages: { type: "integer", minimum: 1, maximum: 1000 } }, additionalProperties: false } },
+
+ {"name": "entities.put", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["idempotencyKey", "name", "entityType", "aliases", "evidence", "confidence"], "properties": {"id": {"type": "string"}, "expectedRevision": {"type": "string"}, "idempotencyKey": {"type": "string"}, "visibility": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "object"}}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "validFrom": {"type": "string"}, "validUntil": {"type": "string"}, "name": {"type": "string"}, "entityType": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+ {"name": "relationships.put", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["idempotencyKey", "fromId", "toId", "relationshipType", "evidence", "confidence"], "properties": {"id": {"type": "string"}, "expectedRevision": {"type": "string"}, "idempotencyKey": {"type": "string"}, "visibility": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "object"}}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "validFrom": {"type": "string"}, "validUntil": {"type": "string"}, "fromId": {"type": "string"}, "toId": {"type": "string"}, "relationshipType": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "entities.resolve", "scope": "read", "boundary": "remote-safe", "schema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}, "additionalProperties": false}},
+ { name: "entities.review.resolve", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision", "idempotencyKey", "decision"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" }, decision: { type: "string", enum: ["merge", "separate", "reject"] }, targetId: { type: "string" } }, additionalProperties: false } },
+ {"name": "entities.reviews", "scope": "admin", "boundary": "local-only", "schema": {"type": "object", "required": [], "properties": {"cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": false}},
+ {"name": "relationships.query", "scope": "read", "boundary": "remote-safe", "schema": {"type": "object", "required": ["from"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "maximumDepth": {"type": "integer", "minimum": 1, "maximum": 3}, "maximumResults": {"type": "integer", "minimum": 1, "maximum": 100}, "direction": {"type": "string", "enum": ["outbound", "inbound", "both"]}, "relationshipTypes": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+	{ name: "context.deliver", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["query"], properties: { query: { type: "string" }, maximumTokens: { type: "integer", minimum: 100, maximum: 2000 }, timeoutMs: { type: "integer", minimum: 50, maximum: 1800 } }, additionalProperties: false } },
+	{ name: "memory.remember", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["idempotencyKey", "text", "provenance"], properties: { idempotencyKey: { type: "string" }, text: { type: "string" }, provenance: { type: "object" }, validFrom: { type: "string" }, validUntil: { type: "string" }, visibility: { type: "array", items: { type: "string" } } }, additionalProperties: false } },
+	{ name: "memory.correct", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["id", "expectedRevision", "idempotencyKey", "text", "provenance"], properties: { ...{ idempotencyKey: { type: "string" }, text: { type: "string" }, provenance: { type: "object" }, validFrom: { type: "string" }, validUntil: { type: "string" }, visibility: { type: "array", items: { type: "string" } } }, id: { type: "string" }, expectedRevision: { type: "string" } }, additionalProperties: false } },
+	{ name: "memory.forget", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["id", "expectedRevision", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" }, reason: { type: "string" } }, additionalProperties: false } },
+	{ name: "capture.claude.enqueue", scope: "write", boundary: "local-only", schema: { type: "object", required: ["installationId", "sessionId", "transcriptPath"], properties: { installationId: { type: "string" }, sessionId: { type: "string" }, transcriptPath: { type: "string" } }, additionalProperties: false } },
+	{ name: "capture.stage", scope: "write", boundary: "local-only", schema: { type: "object", required: ["installationId", "sessionId", "turnId", "prompt"], properties: { installationId: { type: "string" }, sessionId: { type: "string" }, turnId: { type: "string" }, prompt: { type: "string" } }, additionalProperties: false } },
+	{ name: "capture.enqueue", scope: "write", boundary: "local-only", schema: { type: "object", required: ["installationId", "sessionId", "turnId"], properties: { installationId: { type: "string" }, sessionId: { type: "string" }, turnId: { type: "string" } }, additionalProperties: false } },
+	{ name: "memory.recall", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["query"], properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false } },
+	{ name: "memory.history", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id"], properties: { id: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 500 } }, additionalProperties: false } },
+	{ name: "projection.rebuild", scope: "admin", boundary: "local-only", schema: { type: "object", properties: {}, additionalProperties: false } },
+	{ name: "retrieval.search", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["query"], properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, expand: { type: "boolean" }, rerank: { type: "boolean" }, options: { type: "object" } }, additionalProperties: false } },
+	{ name: "retrieval.get", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["id"], properties: { id: { type: "string" } }, additionalProperties: false } },
+	{ name: "retrieval.related", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["id"], properties: { id: { type: "string" } }, additionalProperties: false } },
+ {"name": "answers.get", "scope": "read", "boundary": "remote-safe", "schema": {"type": "object", "required": ["answerId"], "properties": {"answerId": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "answers.feedback", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["answerId", "rating", "idempotencyKey"], "properties": {"answerId": {"type": "string"}, "rating": {"type": "integer", "minimum": -1, "maximum": 1}, "idempotencyKey": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "answers.feedback.reset", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["answerId"], "properties": {"answerId": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "questions.put", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["question", "idempotencyKey"], "properties": {"question": {"type": "string"}, "idempotencyKey": {"type": "string"}, "id": {"type": "string"}, "expectedRevision": {"type": "string"}, "visibility": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+ {"name": "questions.get", "scope": "read", "boundary": "remote-safe", "schema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "questions.refresh", "scope": "write", "boundary": "remote-safe", "schema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}, "additionalProperties": false}},
+ {"name": "questions.list", "scope": "read", "boundary": "remote-safe", "schema": {"type": "object", "required": [], "properties": {}, "additionalProperties": false}},
 	{ name: "reasoning.answer", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["question"], properties: { question: { type: "string" } }, additionalProperties: false } },
 	{ name: "models.diagnose", scope: "read", boundary: "local-only", schema: { type: "object", required: ["endpoint"], properties: { endpoint: { type: "string" }, privacy: { type: "string", enum: ["local", "hosted"] } }, additionalProperties: false } },
 	{ name: "models.activate", scope: "write", boundary: "local-only", schema: { type: "object", required: ["kind", "fingerprint"], properties: { kind: { type: "string" }, fingerprint: { type: "string" }, descriptor: { type: "object" } }, additionalProperties: false } },
+	{ name: "jobs.run-one", scope: "admin", boundary: "local-only", schema: { type: "object", properties: {}, additionalProperties: false } },
 	{ name: "jobs.list", scope: "read", boundary: "remote-safe", schema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 1000 } }, additionalProperties: false } },
-	{ name: "jobs.enqueue", scope: "write", boundary: "local-only", schema: { type: "object", required: ["type", "payload"], properties: { type: { type: "string" }, payload: { type: "object" }, dependencyIds: { type: "array", items: { type: "string" } }, dependencyFailurePolicy: { type: "string", enum: ["cancel", "dead-letter", "degraded"] }, idempotencyKey: { type: "string" } }, additionalProperties: false } },
+	{ name: "jobs.enqueue", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["type", "payload"], properties: { type: { type: "string" }, payload: { type: "object" }, availableAt: { type: "string" }, dependencyIds: { type: "array", items: { type: "string" } }, dependencyFailurePolicy: { type: "string", enum: ["cancel", "dead-letter", "degraded"] }, idempotencyKey: { type: "string" } }, additionalProperties: false } },
 	{ name: "jobs.cancel", scope: "write", boundary: "remote-safe", schema: { type: "object", required: ["id"], properties: { id: { type: "string" } }, additionalProperties: false } },
-	{ name: "jobs.schedule", scope: "write", boundary: "local-only", schema: { type: "object", required: ["type", "payload", "intervalSeconds"], properties: { type: { type: "string" }, payload: { type: "object" }, intervalSeconds: { type: "integer", minimum: 1 }, nextRunAt: { type: "string" } }, additionalProperties: false } },
+	{ name: "jobs.schedule", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["type", "payload", "intervalSeconds"], properties: { type: { type: "string" }, payload: { type: "object" }, intervalSeconds: { type: "integer", minimum: 1 }, nextRunAt: { type: "string" } }, additionalProperties: false } },
 	{ name: "jobs.schedules", scope: "read", boundary: "remote-safe", schema: { type: "object", properties: {}, additionalProperties: false } },
 	{ name: "sources.list", scope: "read", boundary: "remote-safe", schema: { type: "object", properties: { brainId: { type: "string" } }, additionalProperties: false } },
 	{ name: "sources.enable", scope: "admin", boundary: "remote-safe", schema: { type: "object", required: ["id", "enabled", "confirmation", "idempotencyKey"], properties: { id: { type: "string" }, enabled: { type: "boolean" }, confirmation: { type: "string" }, idempotencyKey: { type: "string" } }, additionalProperties: false } },
@@ -87,13 +173,17 @@ export const CONTROL_OPERATION_CATALOG = [
 	{ name: "analysis.route.brains", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["tenantId", "query", "brains"], properties: { tenantId: { type: "string" }, query: { type: "string" }, brains: { type: "array", items: { type: "object" } }, maximumBrains: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false } },
 	{ name: "analysis.diagnose", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["query", "tenantId", "brainId", "candidates"], properties: { query: { type: "string" }, tenantId: { type: "string" }, brainId: { type: "string" }, candidates: { type: "array", items: { type: "object" } } }, additionalProperties: false } },
 	{ name: "analysis.anomaly", scope: "read", boundary: "remote-safe", schema: { type: "object", required: ["records"], properties: { records: { type: "array", items: { type: "object" } } }, additionalProperties: false } },
+ { name: "maintenance.scan", scope: "admin", boundary: "local-only", schema: { type: "object", properties: { maximumItems: { type: "integer", minimum: 1, maximum: 500 }, dryRun: { type: "boolean" } }, additionalProperties: false } },
+ { name: "maintenance.proposals", scope: "admin", boundary: "local-only", schema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 }, after: { type: "string" } }, additionalProperties: false } },
+ { name: "maintenance.accept", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision", "idempotencyKey"], properties: { id: { type: "string" }, expectedRevision: { type: "string" }, idempotencyKey: { type: "string" } }, additionalProperties: false } },
+ { name: "maintenance.dismiss", scope: "admin", boundary: "local-only", schema: { type: "object", required: ["id", "expectedRevision"], properties: { id: { type: "string" }, expectedRevision: { type: "string" } }, additionalProperties: false } },
 	{ name: "maintenance.propose", scope: "write", boundary: "local-only", schema: { type: "object", required: ["tenantId", "brainId", "findings"], properties: { tenantId: { type: "string" }, brainId: { type: "string" }, findings: { type: "array", items: { type: "string" } }, dryRun: { type: "boolean" } }, additionalProperties: false } },
 ] as const satisfies ReadonlyArray<{ name: string; scope: "read" | "write" | "admin"; boundary: "remote-safe" | "local-only" | "confined-upload"; schema: JsonSchema }>;
 
 export type CatalogOperationName = (typeof CONTROL_OPERATION_CATALOG)[number]["name"];
 export const ALL_OPERATION_NAMES = [...brainRepositoryOperationNames, ...CONTROL_OPERATION_CATALOG.map((entry) => entry.name)] as const;
 
-function dependency<T>(value: T | undefined, name: string): T { if (!value) throw new Error(`${name} operation dependency is unavailable`); return value; }
+function dependency<T>(value: T | undefined, name: string): T { if (!value) throw Object.assign(new Error(`${name} operation dependency is unavailable`), { code: "operation_dependency_unavailable", retryable: false, suggestedFix: "Start the configured local service, or supply the required repository, operational store and local provider configuration." }); return value; }
 function scopedTenant(context: OperationContext, args: Record<string, unknown>): string {
 	const tenantId = typeof args.tenantId === "string" ? args.tenantId : context.tenantId ?? "local";
 	if (tenantId !== (context.tenantId ?? "local")) throw new Error("operation tenant scope is insufficient");
@@ -117,12 +207,96 @@ export function createFullOperationRegistry(dependencies: CatalogDependencies): 
 	const registry = createBrainRepositoryOperationRegistry(dependencies.repository);
 	for (const entry of CONTROL_OPERATION_CATALOG) {
 		registry.register({ name: entry.name, description: `Execute the ${entry.name} contract.`, inputSchema: entry.schema, outputSchema: { type: "object" }, requiredScope: entry.scope, trustBoundary: entry.boundary, execute: async (context, input) => {
+            if (context.allowedAccessLabels !== undefined && isOwnerMetadataOperation(entry.name)) throw Object.assign(new Error("Operational metadata requires owner administration access."), { code: "owner_access_required", retryable: false, suggestedFix: "Use the unrestricted local owner CLI for jobs, sources, agent runs, cache, and skill usage administration." });
 			const custom = dependencies.handlers?.[entry.name];
 			if (custom) return custom(context, input as Record<string, unknown>);
 			const args = input as Record<string, unknown>;
+            if (RUNTIME_OPERATION_CATALOG.some((operation) => operation.name === entry.name)) return executeRuntimeOperation({ repository: dependencies.repository as import("./repository").BrainRepository, store: dependencies.store, config: dependencies.backupConfig, embeddingProvider: dependencies.embeddingProvider, transcriptionProvider: dependencies.transcriptionProvider }, context, entry.name, args);
+            if (LOCAL_INGESTION_CATALOG.some((operation) => operation.name === entry.name)) return executeLocalIngestion({ repository: dependencies.repository as import("./repository").BrainRepository, store: dependency(dependencies.store, "local ingestion") }, context, entry.name, args);
+
+            if (entry.name === "projection.rebuild" || entry.name === "retrieval.search" || entry.name === "retrieval.related" || entry.name === "reasoning.answer") {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                const snapshot = await repository.snapshot() as Awaited<ReturnType<typeof repository.snapshot>> & { tenantId?: string };
+                if (context.tenantId && context.tenantId !== (snapshot.tenantId ?? "local") || context.brainId && context.brainId !== snapshot.brainId) throw new Error("brain scope is not authorized");
+                if (entry.name === "projection.rebuild") {
+                    if (context.allowedAccessLabels !== undefined) throw new Error("owner administration access is required");
+                    context.signal?.throwIfAborted();
+                    return indexBrainRepository(dependency(dependencies.store, "projection"), repository);
+                }
+                context.signal?.throwIfAborted();
+                await ensureCurrentBrainProjection(dependency(dependencies.store, "retrieval"), repository);
+                context.signal?.throwIfAborted();
+            }
+
+            if (entry.name.startsWith("execution.")) {
+             const execution = { store: dependency(dependencies.store, "execution"), repository: dependencies.repository as import("./repository").BrainRepository, managedWrites: () => dependencies.backupConfig?.automation?.managedWrites === true };
+             if (entry.name === "execution.start") return startExecution(execution, context, args as unknown as Parameters<typeof startExecution>[2]);
+             if (entry.name === "execution.status") return executionStatus(execution, context, args as unknown as Parameters<typeof executionStatus>[2]);
+             if (entry.name === "execution.list") return listExecutions(execution, context, args as unknown as Parameters<typeof listExecutions>[2]);
+             return cancelExecution(execution, context, String(args.id));
+            }
+            if (entry.name === "sources.conversation.ingest") return ingestConversation({ repository: dependencies.repository as import("./repository").BrainRepository, store: dependency(dependencies.store, "conversation ingestion") }, context, args as { conversation: unknown; dryRun?: boolean });
+            if (entry.name.startsWith("backup.")) return runtimeBackupOperations(dependency(dependencies.backupConfig, "backup configuration")).find((operation) => operation.name === entry.name)!.execute(context, args);
 			const controlContext = { principal: context.principal ?? "anonymous", tenantId: context.tenantId ?? "local", ...(context.brainId ? { brainId: context.brainId } : {}), scope: context.scope };
+            if (entry.name === "google.accounts.connect") return connectGoogleAccount({ store: dependency(dependencies.store, "Google account setup"), repository: dependencies.repository as import("./repository").BrainRepository, credentials: dependencies.googleCredentials, authorize: dependencies.googleAuthorization }, context, args as unknown as Parameters<typeof connectGoogleAccount>[2]);
+            if (entry.name.startsWith("google.sources.")) {
+                const google = { store: dependency(dependencies.store, "Google ingestion"), repository: dependencies.repository as import("./repository").BrainRepository, credentials: dependencies.googleCredentials };
+                if (entry.name === "google.sources.add") return addGoogleSource(google, context, args.boundary as GoogleBoundary);
+                if (entry.name === "google.sources.status") return googleSourceStatus(google, context);
+                if (entry.name === "google.sources.schedule") return scheduleGoogleSource(google, context, args as unknown as Parameters<typeof scheduleGoogleSource>[2]);
+                if (entry.name === "google.sources.enable") return setGoogleSourceEnabled(google, context, args as unknown as Parameters<typeof setGoogleSourceEnabled>[2]);
+                return enqueueGoogleSync(google, context, args as unknown as Parameters<typeof enqueueGoogleSync>[2]);
+            }
+            if (entry.name.startsWith("reminders.")) {
+                const repository = dependencies.repository as import("./repository").BrainRepository, store = dependency(dependencies.store, "reminders");
+                return entry.name === "reminders.enqueue" ? enqueueReminder(repository, store, context, args as { id: string; expectedRevision: string }) : listReminders(repository, store, context, args);
+            }
+            if (entry.name.startsWith("meetings.")) {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                if (entry.name === "meetings.get") return getMeetingPreparation(repository, context, String(args.id));
+                return prepareMeeting(repository, dependency(dependencies.store, "meeting preparation"), context, args as unknown as Parameters<typeof prepareMeeting>[3], { embeddingProvider: dependencies.embeddingProvider, rerankerProvider: dependencies.rerankerProvider });
+            }
+            if (entry.name.startsWith("loops.")) {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                if (entry.name === "loops.put") return putOpenLoop(repository, context, args as unknown as Parameters<typeof putOpenLoop>[2]);
+                if (entry.name === "loops.status") return setOpenLoopStatus(repository, context, args as unknown as Parameters<typeof setOpenLoopStatus>[2]);
+                if (entry.name === "loops.get") return getOpenLoop(repository, context, String(args.id));
+                return listOpenLoops(repository, context, args as Parameters<typeof listOpenLoops>[2]);
+            }
+            if (entry.name.startsWith("entities.") || entry.name.startsWith("relationships.")) {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                if (entry.name === "entities.put") return putEntity(repository, context, args as unknown as Parameters<typeof putEntity>[2]);
+                if (entry.name === "relationships.put") return putRelationship(repository, context, args as unknown as Parameters<typeof putRelationship>[2]);
+                if (entry.name === "entities.resolve") return resolveEntity(repository, context, String(args.query));
+                if (entry.name === "entities.reviews") return entityReviews(repository, context, args as { cursor?: string; limit?: number });
+                if (entry.name === "entities.review.resolve") return resolveEntityReview(repository, context, args as unknown as Parameters<typeof resolveEntityReview>[2]);
+                return queryRelationships(repository, context, args as unknown as Parameters<typeof queryRelationships>[2]);
+            }
+			if (entry.name === "context.deliver") return deliverContext(registry, context, args as unknown as { query: string; maximumTokens?: number; timeoutMs?: number });
+			if (entry.name === "capture.stage" || entry.name === "capture.enqueue" || entry.name === "capture.claude.enqueue") {
+				if (context.tenantId && context.tenantId !== "local") throw new Error("capture tenant is not authorized");
+				const store = dependency(dependencies.store, "capture"), stateRoot = dependency(dependencies.stateRoot, "capture configuration");
+				const identity = await (dependencies.repository as import("./repository").BrainRepository).getIdentity();
+				if (context.brainId && context.brainId !== identity.brainId) throw new Error("capture brain is not authorized");
+				if (entry.name === "capture.claude.enqueue") return enqueueClaudeTranscript(store, stateRoot, args as unknown as ClaudeTranscriptInput, identity.brainId);
+				return entry.name === "capture.stage" ? stageCaptureTurn(store, stateRoot, args as unknown as CaptureTurn, identity.brainId) : enqueueCaptureTurn(store, stateRoot, args as unknown as CaptureTurn, identity.brainId);
+			}
+			if (entry.name.startsWith("memory.")) {
+				const repository = dependencies.repository as import("./repository").BrainRepository;
+
+				if (entry.name === "memory.recall") return recall(repository, context, args as unknown as { query: string; limit?: number });
+				if (entry.name === "memory.history") return memoryHistory(repository, context, String(args.id), args.limit as number | undefined);
+				const result = entry.name === "memory.remember" ? await remember(repository, context, args as unknown as MemoryWriteInput) : entry.name === "memory.correct" ? await correct(repository, context, args as unknown as MemoryCorrectInput) : await forget(repository, context, args as unknown as MemoryForgetInput);
+				if (dependencies.store) await indexBrainRepository(dependencies.store, repository);
+				return result;
+			}
+            if (entry.name.startsWith("jobs.") && context.allowedAccessLabels !== undefined || (entry.name === "jobs.enqueue" || entry.name === "jobs.schedule") && context.scope !== "admin") throw new GoogleApiError("owner_access_required", 403, false);
 			if (entry.name === "jobs.list") return listJobs(dependency(dependencies.store, "jobs"), Number(args.limit ?? 100), context.tenantId);
-			if (entry.name === "jobs.enqueue") return enqueueJob(dependency(dependencies.store, "jobs"), { type: String(args.type), payload: args.payload, tenantId: context.tenantId, dependencyIds: Array.isArray(args.dependencyIds) ? args.dependencyIds as string[] : [], dependencyFailurePolicy: args.dependencyFailurePolicy as "cancel" | "dead-letter" | "degraded" | undefined, idempotencyKey: args.idempotencyKey as string | undefined });
+            if (entry.name === "jobs.enqueue") {
+                const availableAt = typeof args.availableAt === "string" ? new Date(args.availableAt) : undefined;
+                if (availableAt && Number.isNaN(availableAt.getTime())) throw new Error("invalid job availability timestamp");
+                return enqueueJob(dependency(dependencies.store, "jobs"), { type: String(args.type), payload: args.payload, tenantId: context.tenantId, availableAt, dependencyIds: Array.isArray(args.dependencyIds) ? args.dependencyIds as string[] : [], dependencyFailurePolicy: args.dependencyFailurePolicy as "cancel" | "dead-letter" | "degraded" | undefined, idempotencyKey: args.idempotencyKey as string | undefined });
+            }
 			if (entry.name === "jobs.cancel") return cancelJob(dependency(dependencies.store, "jobs"), String(args.id), context.tenantId);
 			if (entry.name === "jobs.schedule") {
 				const nextRunAt = typeof args.nextRunAt === "string" ? new Date(args.nextRunAt) : undefined;
@@ -130,19 +304,55 @@ export function createFullOperationRegistry(dependencies: CatalogDependencies): 
 				return createJobSchedule(dependency(dependencies.store, "jobs"), { type: String(args.type), payload: args.payload, intervalSeconds: Number(args.intervalSeconds), tenantId: context.tenantId, ...(nextRunAt ? { nextRunAt } : {}) });
 			}
 			if (entry.name === "jobs.schedules") return listJobSchedules(dependency(dependencies.store, "jobs"), context.tenantId);
+			if (entry.name === "retrieval.get" || entry.name === "retrieval.related") {
+				const repository = dependencies.repository as unknown as Parameters<typeof searchVerifiedHybridBrainRepository>[1];
+				const snapshot = await repository.snapshot();
+				if (context.tenantId && context.tenantId !== (snapshot.tenantId ?? "local") || context.brainId && context.brainId !== snapshot.brainId) throw new Error("brain scope is not authorized");
+				const page = snapshot.pages.find((page) => page.id === args.id && !page.deleted && !page.stale && memoryIsActive(page));
+				if (!page || !isPrimaryEvidence(page) || context.allowedAccessLabels && (page.accessLabels ?? []).some((label) => !context.allowedAccessLabels!.includes(label))) throw new Error("document is unavailable");
+				if (entry.name === "retrieval.related") return (await relatedBrainPages(dependency(dependencies.store, "retrieval"), page.path, snapshot.brainId, context.tenantId ?? "local", context.allowedAccessLabels, repository)).filter((related) => snapshot.pages.some((entry) => entry.id === related.id && !entry.deleted && !entry.stale && memoryIsActive(entry) && (context.allowedAccessLabels === undefined || (entry.accessLabels ?? []).every((label) => context.allowedAccessLabels!.includes(label)))));
+				return { ...page, ...(await repository.readPage(snapshot, page.id)), commit: snapshot.commit };
+			}
 			if (entry.name === "retrieval.search") {
 				const repository = dependencies.repository as unknown as Parameters<typeof searchVerifiedHybridBrainRepository>[1];
 				const snapshot = await repository.snapshot();
-				const results = await searchVerifiedHybridBrainRepository(dependency(dependencies.store, "retrieval"), repository, String(args.query), { limit: Number(args.limit ?? 20), brainId: context.brainId ?? snapshot.brainId, tenantId: context.tenantId ?? "local", allowedAccessLabels: context.allowedAccessLabels, embeddingProvider: dependencies.embeddingProvider, rerankerProvider: dependencies.rerankerProvider });
-				return { query: String(args.query), results };
+				const options = (args.options ?? {}) as SearchOptions;
+				validateSearchOptions(options);
+				const limit = Number(args.limit ?? options.limit ?? 20);
+				if (options.mode === "semantic" && !dependencies.embeddingProvider) return { query: String(args.query), results: [], degraded: true, diagnostics: ["Configure a local embedding provider."], requestedMode: "semantic", effectiveMode: "unavailable" };
+				const hasFilters = ["provider", "project", "repository", "workspace", "role", "after", "before"].some((key) => options[key as keyof SearchOptions] !== undefined);
+				const candidates = await searchVerifiedHybridBrainRepository(dependency(dependencies.store, "retrieval"), repository, String(args.query), { limit: hasFilters ? 100 : limit, mode: options.mode, expand: args.expand === true && options.mode !== "semantic", brainId: context.brainId ?? snapshot.brainId, tenantId: context.tenantId ?? "local", allowedAccessLabels: context.allowedAccessLabels, embeddingProvider: options.mode === "keyword" ? undefined : dependencies.embeddingProvider, rerankerProvider: options.mode === "keyword" && args.rerank !== true ? undefined : dependencies.rerankerProvider });
+				const results = [];
+				for (const candidate of candidates) {
+					const content = (await repository.readPage(snapshot, candidate.citation.documentId)).content;
+					const values = parseFrontmatter(content)?.values ?? {};
+					const metadata = snapshot.pages.find((page) => page.id === candidate.citation.documentId)?.source?.provenance?.metadata ?? {};
+					const field = (name: string) => String(values[name] ?? metadata[name] ?? "");
+					if (["provider", "project", "repository", "workspace"].some((key) => options[key as keyof SearchOptions] && field(key) !== options[key as keyof SearchOptions])) continue;
+					if (options.role && !new RegExp("^" + options.role + ":", "mi").test(candidate.verifiedText)) continue;
+					const at = field("updated_at") || field("created_at");
+					if (options.after && (!at || Date.parse(at) < Date.parse(options.after)) || options.before && (!at || Date.parse(at) > Date.parse(options.before))) continue;
+					results.push({ ...candidate, metadata: values });
+				}
+				return { query: String(args.query), ...(args.expand === true && options.mode !== "semantic" ? { variants: expandLocalQuery(String(args.query)) } : {}), results: results.slice(0, limit) };
 			}
-			if (entry.name === "reasoning.answer") {
-				const repository = dependencies.repository as unknown as Parameters<typeof searchVerifiedHybridBrainRepository>[1];
-				const snapshot = await repository.snapshot();
-				const results = await searchVerifiedHybridBrainRepository(dependency(dependencies.store, "reasoning"), repository, String(args.question), { limit: 20, brainId: context.brainId ?? snapshot.brainId, tenantId: context.tenantId ?? "local", allowedAccessLabels: context.allowedAccessLabels, embeddingProvider: dependencies.embeddingProvider, rerankerProvider: dependencies.rerankerProvider });
-				const evidence = results.map((result) => ({ text: result.verifiedText, citation: { ...result.citation, projectedCommit: result.citation.commit } }));
-				return { question: String(args.question), ...buildReasonedAnswer({ answer: results.map((result) => result.verifiedText).join("\n\n"), evidence }) };
-			}
+            if (entry.name === "reasoning.answer" || entry.name.startsWith("answers.") || entry.name.startsWith("questions.")) {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                const maintained = { store: dependency(dependencies.store, "answers"), repository, provider: dependencies.generationProvider, searchOptions: { embeddingProvider: dependencies.embeddingProvider, rerankerProvider: dependencies.rerankerProvider } };
+                if (entry.name === "reasoning.answer") return createAnswer(maintained, context, String(args.question));
+                if (entry.name === "answers.get") return getAnswer(maintained, context, String(args.answerId));
+                if (entry.name === "answers.feedback") return answerFeedback(maintained, context, args as unknown as Parameters<typeof answerFeedback>[2]);
+                if (entry.name === "answers.feedback.reset") return resetAnswerFeedback(maintained, context, String(args.answerId));
+                if (entry.name === "questions.put") return definePin(maintained, context, args as unknown as Parameters<typeof definePin>[2]);
+                if (entry.name === "questions.get") return pinStatus(maintained, context, String(args.id));
+                if (entry.name === "questions.refresh") return enqueuePinRefresh(maintained, context, String(args.id));
+                const pins = [];
+                for (const page of (await repository.snapshot()).pages.filter((page) => !page.deleted && page.source?.type === "manas-pinned-question")) {
+                    if (context.allowedAccessLabels && (page.accessLabels ?? []).some((label) => !context.allowedAccessLabels!.includes(label))) continue;
+                    pins.push(await pinStatus(maintained, context, page.id));
+                }
+                return { questions: pins };
+            }
 			if (entry.name === "models.diagnose") return diagnoseProvider({ endpoint: String(args.endpoint), privacy: args.privacy === "hosted" ? "hosted" : "local" });
 			if (entry.name === "models.activate") {
 				const store = dependency(dependencies.store, "models");
@@ -167,6 +377,16 @@ export function createFullOperationRegistry(dependencies: CatalogDependencies): 
 			if (entry.name === "analysis.recall") return recallMemories(args.records as never, { tenantId: scopedTenant(context, args), brainId: scopedBrain(context, args), query: String(args.query), limit: args.limit as number | undefined });
 			if (entry.name === "analysis.forget") return forgetMemory(args.records as never, { tenantId: scopedTenant(context, args), brainId: scopedBrain(context, args), id: String(args.id) });
 			if (entry.name === "analysis.contributor") return captureContributorQuery({ id: String(args.id), tenantId: scopedTenant(context, args), brainId: scopedBrain(context, args), query: String(args.query), consent: args.consent === true });
+            if (["maintenance.scan", "maintenance.proposals", "maintenance.dismiss", "maintenance.accept"].includes(entry.name)) {
+                const repository = dependencies.repository as import("./repository").BrainRepository;
+                if (entry.name === "maintenance.proposals") return maintenanceProposals(repository, context, args as { limit?: number; after?: string });
+                if (entry.name === "maintenance.accept") return applyRelationshipProposal(repository, context, args as { id: string; expectedRevision: string; idempotencyKey: string });
+                if (entry.name === "maintenance.dismiss") return dismissMaintenanceProposal(repository, context, args as { id: string; expectedRevision: string });
+                if (context.allowedAccessLabels !== undefined || context.scope !== "admin") throw new GoogleApiError("owner_access_required", 403, false);
+                const snapshot = await repository.snapshot();
+                if ((context.tenantId ?? "local") !== "local" || context.brainId && context.brainId !== snapshot.brainId) throw new GoogleApiError("owner_access_required", 403, false);
+                return enqueueJob(dependency(dependencies.store, "maintenance"), { type: "maintenance-scan", tenantId: "local", payload: { brainId: snapshot.brainId, maximumItems: args.maximumItems ?? 100, dryRun: args.dryRun === true } });
+            }
 			if (entry.name === "maintenance.propose") return proposeSelfMaintenance({ tenantId: scopedTenant(context, args), brainId: scopedBrain(context, args), findings: args.findings as string[], dryRun: args.dryRun as boolean | undefined });
 			if (entry.name === "skills.list") return createPinnedSkillRegistry().list();
 			if (entry.name === "skills.resolve") return createPinnedSkillRegistry().resolve(String(args.id), String(args.agent) as never, args.version as string | undefined);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultConfig } from "../src/config";
 
 const { createBrainEngine, createConfiguredBrainEngine } = await import("../src/engine");
 const roots: string[] = [];
@@ -14,6 +15,29 @@ describe("library engine factory", () => {
 		const engine = await createBrainEngine({ repositoryRoot: join(root, "brain") });
 		expect((await engine.repository.getIdentity()).brainId).toBeString();
 		await expect(engine.close()).resolves.toBeUndefined();
+	});
+
+	test("shares configured retrieval providers with its operation registry", async () => {
+		const root = await mkdtemp(join(tmpdir(), "brain-engine-registry-"));
+		roots.push(root);
+		let calls = 0;
+		const engine = await createBrainEngine({ repositoryRoot: join(root, "brain"), storePath: join(root, "state"), config: defaultConfig({}), providers: { reranking: { id: "test", rerank: async (_query, documents) => { calls++; return documents.map((document) => ({ id: document.id, score: 1 })); } } } });
+		try {
+			const { execFile } = await import("node:child_process");
+			const { promisify } = await import("node:util");
+			await promisify(execFile)("git", ["-C", engine.repository.root, "config", "user.name", "Test"]);
+			await promisify(execFile)("git", ["-C", engine.repository.root, "config", "user.email", "test@example.invalid"]);
+			await engine.repository.putPage("notes/example.md", "Juniper project ownership belongs to Maya.");
+			const { indexBrainRepository } = await import("../src/brain/pglite-indexer");
+			await indexBrainRepository(engine.store!, engine.repository);
+			const result = await engine.operations.execute({ scope: "read", tenantId: "local" }, "retrieval.search", { query: "Juniper" });
+			expect(result).toMatchObject({ results: [{ path: "notes/example.md", verifiedText: "Juniper project ownership belongs to Maya." }] });
+			expect(calls).toBe(1);
+			await engine.operations.execute({ scope: "admin", tenantId: "local" }, "jobs.enqueue", { type: "index", payload: { repositoryRoot: engine.repository.root }, idempotencyKey: "engine-worker" });
+			expect(await engine.operations.execute({ scope: "admin", tenantId: "local" }, "jobs.run-one", {})).toMatchObject({ job: { type: "index", status: "complete" } });
+			await expect(engine.operations.execute({ scope: "read" }, "jobs.run-one", {})).rejects.toThrow("scope");
+
+		} finally { await engine.close(); }
 	});
 
 	test("constructs configured providers and auth from a config file", async () => {

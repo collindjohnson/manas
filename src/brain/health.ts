@@ -3,10 +3,6 @@ import { configuredArchiveEmbeddingProvider, countArchiveEmbeddings } from "@man
 import type { Config } from "../config";
 import { scanArchive } from "../archive";
 import { assertBrainIntegrity, openBrainDatabase } from "./database";
-import {
-	createZeroEntropyClient,
-	resolveZeroEntropyCredential,
-} from "./zeroentropy";
 
 export interface BrainHealth {
 	ok: boolean;
@@ -39,7 +35,7 @@ export interface BrainHealth {
 			tombstones: number;
 		};
 		run?: { status: string; localStatus?: string; remoteStatus?: string };
-		zeroEntropy: "ready" | "degraded" | "not-checked";
+		zeroEntropy: "ready" | "degraded" | "not-checked" | "disabled";
 	};
 }
 export async function brainHealth(config: Config): Promise<BrainHealth> {
@@ -117,44 +113,13 @@ export async function brainHealth(config: Config): Promise<BrainHealth> {
 		);
 		if (indexedDocuments !== scan.documents.length)
 			warnings.push("index is stale; run index");
-		const credential = localEmbeddingProvider
-			? { value: "local", source: "local" as const }
-			: await resolveZeroEntropyCredential(
-					brain.keychainService,
-					brain.keychainAccount,
-				);
+		const credential = localEmbeddingProvider ? { value: "local", source: "local" as const } : { value: undefined, source: "missing" as const };
+		const semanticWarning = "semantic search is unavailable: configure a local embedding model in providers.embedding";
 		if (localEmbeddingProvider) {
-			if (countArchiveEmbeddings(database, localEmbeddingProvider) < indexedChunks)
-				warnings.push("semantic index is stale; run index");
-			} else if (!credential.value)
-			warnings.push("semantic search is unavailable: ZeroEntropy credential is not configured");
-		else if (synchronizedChunks !== indexedChunks)
-			warnings.push(uploadedChunks ? "semantic indexing is pending remote completion" : "semantic index is stale; run index");
-		if (!localEmbeddingProvider && failedChunks) warnings.push("semantic synchronization has failed work");
-		if (!localEmbeddingProvider && tombstones) warnings.push("semantic deletions are pending");
-		let zeroEntropy: "ready" | "degraded" | "not-checked" = "not-checked";
-		if (credential.value && !localEmbeddingProvider) {
-			try {
-				await createZeroEntropyClient({
-					baseUrl: brain.zeroEntropyBaseUrl,
-					collection: brain.zeroEntropyCollection,
-					apiKey: credential.value,
-					timeoutMs: brain.requestTimeoutMs,
-					retryAttempts: 1,
-				}).status?.();
-				zeroEntropy = "ready";
-			} catch {
-				zeroEntropy = "degraded";
-				warnings.push("ZeroEntropy live health check failed");
-			}
-		}
-		const optionalSemanticWarnings = !localEmbeddingProvider && !credential.value
-			? new Set([
-					"semantic search is unavailable: ZeroEntropy credential is not configured",
-					"semantic deletions are pending",
-				])
-			: new Set<string>();
-		const coreWarnings = warnings.filter((warning) => !optionalSemanticWarnings.has(warning));
+			if (countArchiveEmbeddings(database, localEmbeddingProvider) < indexedChunks) warnings.push("semantic index is stale; run index");
+		} else warnings.push(semanticWarning);
+		const zeroEntropy = "disabled";
+		const coreWarnings = warnings.filter((warning) => warning !== semanticWarning);
 		const latestRun = database
 			.prepare(
 				"SELECT status, local_status, remote_status FROM index_runs ORDER BY id DESC LIMIT 1",

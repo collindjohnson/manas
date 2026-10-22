@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T02:01:24.535Z",
+  "agent": "claude-code",
+  "nativeVersion": "2.1.220 (Claude Code)",
+  "inference": {
+    "mode": "local-ollama",
+    "model": "qwen3.8:27b",
+    "endpoint": "http://127.0.0.1:11434",
+    "fallback": false
+  },
+  "isolated": true,
+  "persistentConfigurationChanged": false,
+  "automaticCaptureEnabled": false,
+  "checks": [
+    {
+      "name": "hook-context",
+      "passed": true,
+      "delivered": true,
+      "exactCitation": true,
+      "citedDocument": true,
+      "citedRevision": true,
+      "citedCommit": true,
+      "excludedPrivateEvidence": true,
+      "latencyMs": 24411,
+      "nativeResult": "success"
+    },
+    {
+      "name": "authorized-mcp-capture",
+      "passed": true,
+      "memories": 1,
+      "latencyMs": 146046,
+      "nativeResult": "success"
+    }
+  ],
+  "passed": true,
+  "limitations": "Synthetic native print-mode sessions with transient settings. Inference mode is recorded separately; local Ollama mode does not verify subscription authentication. Tests hook context and explicit MCP capture; automatic Stop capture and persistent installation trust are separate checks."
+}

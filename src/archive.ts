@@ -361,6 +361,12 @@ export async function applyArchiveChanges(
 }
 
 export async function ensureArchiveRoot(root: string): Promise<void> {
+	try {
+		await stat(root);
+		return;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
 	await mkdir(root, { recursive: true, mode: 0o700 });
 	await chmod(root, 0o700);
 	await stat(root);

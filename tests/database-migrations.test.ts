@@ -51,7 +51,7 @@ describe("ordered database migrations", () => {
 		await store.exec("DELETE FROM brain_migration_history WHERE version > 14; DROP TABLE brain_chunk_embeddings; UPDATE brain_schema_meta SET value = '14' WHERE key = 'schema_version'");
 		await store.close();
 		const reopened = await openPgliteBrainStore(directory);
-		expect((await reopened.query<{ version: number }>("SELECT version FROM brain_migration_history ORDER BY version DESC LIMIT 1"))[0]?.version).toBe(24);
+		expect((await reopened.query<{ version: number }>("SELECT version FROM brain_migration_history ORDER BY version DESC LIMIT 1"))[0]?.version).toBe(BRAIN_STORE_SCHEMA_VERSION);
 		expect(await reopened.query("SELECT 1 FROM brain_chunk_embeddings LIMIT 1")).toEqual([]);
 		await reopened.close();
 	});
@@ -59,9 +59,9 @@ describe("ordered database migrations", () => {
 	test("rolls back a failed migration transaction without recording partial schema", async () => {
 		const store = await openPgliteBrainStore();
 		try {
-			const broken = sqlMigration(25, "broken-test-migration", "CREATE TABLE brain_failed_migration_fixture (id text PRIMARY KEY)", async () => { throw new Error("mid migration failure"); });
+			const broken = sqlMigration(BRAIN_STORE_SCHEMA_VERSION + 1, "broken-test-migration", "CREATE TABLE brain_failed_migration_fixture (id text PRIMARY KEY)", async () => { throw new Error("mid migration failure"); });
 			await expect(runDatabaseMigrations(store, [...BRAIN_STORE_MIGRATIONS, broken])).rejects.toThrow("mid migration failure");
-			expect(await store.query("SELECT version FROM brain_migration_history WHERE version = 25")).toEqual([]);
+			expect(await store.query(`SELECT version FROM brain_migration_history WHERE version = ${BRAIN_STORE_SCHEMA_VERSION + 1}`)).toEqual([]);
 			await expect(store.query("SELECT 1 FROM brain_failed_migration_fixture")).rejects.toThrow();
 		} finally { await store.close(); }
 	});
