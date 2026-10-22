@@ -30,10 +30,10 @@ describe("sync system", () => {
     }
   });
 
-  test("writes indexes, report, state, and verifies generated archive", async () => {
+  test("writes indexes, report, state, and preserves an existing secure archive root", async () => {
     const config = await configDir();
     await mkdir(config.archiveRoot, { recursive: true });
-    await chmod(config.archiveRoot, 0o755);
+    await chmod(config.archiveRoot, 0o700);
     const conversation = buildConversation("grok", "grok-1", "/tmp/grok", {}, [{ role: "user", text: "Hi" }, { role: "assistant", text: "Hello" }], "Grok");
     const result = await runSync(config, { conversations: [conversation!] });
     expect(result.report.totals.created).toBe(1);
@@ -44,6 +44,13 @@ describe("sync system", () => {
     expect(verification.ok).toBe(true);
     expect(verification.documents).toBe(1);
     expect((await stat(join(config.stateRoot, "state.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  test("creates a new archive root with private permissions", async () => {
+    const config = await configDir();
+    const conversation = buildConversation("grok", "grok-private-root", join(tmpdir(), "grok"), {}, [{ role: "user", text: "Hi" }], "Grok");
+    await runSync(config, { conversations: [conversation!] });
+    expect((await stat(config.archiveRoot)).mode & 0o777).toBe(0o700);
   });
 
   test("dry-run does not create archive or state directories", async () => {

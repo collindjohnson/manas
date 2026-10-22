@@ -2,12 +2,9 @@ import type { Config } from "../config";
 import type { SearchOptions, SearchOutcome, SearchResult } from "../model";
 import { openBrainDatabase } from "./database";
 import { graphContributions } from "./graph";
-import {
-	createZeroEntropyClient,
-	resolveZeroEntropyApiKey,
-} from "./zeroentropy";
 
 import { configuredArchiveEmbeddingProvider, searchArchiveEmbeddings } from "@manas-brain-archive-embeddings";
+import { APPROVAL_LOG_TITLE, INJECTED_CONTEXT_TITLES, archiveSourcePriority, seeksOperationalRecords } from "@manas-brain-search-quality";
 
 export const RRF_K = 60;
 export const MAX_GRAPH_BOOST = 0.1;
@@ -111,10 +108,17 @@ function lexicalRows(
 		clauses.push("COALESCE(d.updated_at, d.created_at, '') <= ?");
 		values.push(options.before);
 	}
+	// Apply source quality before the candidate cap so operational transcripts
+	// cannot crowd ordinary conversations out of the candidate pool.
+	let sourceOrder = "";
+	if (!seeksOperationalRecords(query)) {
+		sourceOrder = `CASE WHEN d.title LIKE ? OR d.title IN (${INJECTED_CONTEXT_TITLES.map(() => "?").join(",")}) THEN 0 ELSE 1 END DESC, `;
+		values.push(`${APPROVAL_LOG_TITLE}%`, ...INJECTED_CONTEXT_TITLES);
+	}
 	values.push(limit);
 	return database
 		.prepare(
-			`SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.manas_id = c.document_id WHERE ${clauses.join(" AND ")} ORDER BY rank, c.id LIMIT ?`,
+			`SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, bm25(chunks_fts) AS rank FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id JOIN documents d ON d.manas_id = c.document_id WHERE ${clauses.join(" AND ")} ORDER BY ${sourceOrder}rank, c.id LIMIT ?`,
 		)
 		.all(...values) as Row[];
 }
@@ -225,46 +229,7 @@ async function searchInternal(
 							};
 						}
 					}
-					const key = await resolveZeroEntropyApiKey(
-							brain.keychainService,
-							brain.keychainAccount,
-						);
-						if (!key)
-							return {
-								items: [],
-								degradation:
-									"semantic search is unavailable: ZeroEntropy credential is not configured",
-							};
-						try {
-							const remote = await createZeroEntropyClient({
-								baseUrl: brain.zeroEntropyBaseUrl,
-								collection: brain.zeroEntropyCollection,
-								apiKey: key,
-								timeoutMs: brain.requestTimeoutMs,
-								retryAttempts: brain.retryAttempts,
-								retryBackoffMs: brain.retryBackoffMs,
-							}).search(query, candidateLimit, metadataFilter(options));
-							const get = database.prepare(
-								"SELECT c.id AS chunk_id, c.text, d.manas_id, d.relative_path, d.title, d.provider, d.project, d.repository, d.workspace, c.role, d.created_at, d.updated_at, 0 AS rank FROM chunks c JOIN documents d ON d.manas_id = c.document_id WHERE c.id = ?",
-							);
-							return {
-								items: remote.flatMap((item) => {
-									const row = get.get(item.id) as Row | null;
-									return row && matches(row, options)
-										? [{ row, score: item.score }]
-										: [];
-								}),
-								degradation: undefined,
-							};
-						} catch (error) {
-							return {
-								items: [],
-								degradation:
-									error instanceof Error
-										? error.message
-										: "semantic search is unavailable",
-							};
-						}
+					return { items: [], degradation: "semantic search is unavailable: configure a local embedding model in providers.embedding" };
 					})();
 		const lexicalTask = Promise.resolve(
 			mode === "semantic"
@@ -309,15 +274,18 @@ async function searchInternal(
 				(item.lexicalRank ? 1 / (RRF_K + item.lexicalRank) : 0) +
 				(item.semanticRank ? 1 / (RRF_K + item.semanticRank) : 0);
 			const facts = contributions.get(item.row.manas_id) ?? [];
-			// Each explicit shared fact contributes a small fixed amount. The cap
-			// prevents a densely connected conversation from dominating retrieval.
+			// Shared metadata is a tie-breaker, not evidence of query relevance.
+			// Adding this to RRF would let dense clusters (such as approval logs)
+			// overwhelm stronger lexical or semantic matches.
 			const graphBoost = Math.min(MAX_GRAPH_BOOST, facts.length * 0.025);
+			const sourcePriority = archiveSourcePriority(item.row.title, query);
 			return {
 				item,
 				unboosted,
 				graphBoost,
 				facts,
-				final: unboosted + graphBoost,
+				sourcePriority,
+				final: sourcePriority + unboosted,
 			};
 		});
 		const finalValues = scored.map((item) => item.final);
@@ -328,6 +296,7 @@ async function searchInternal(
 				.sort(
 					(a, b) =>
 						b.final - a.final ||
+						b.graphBoost - a.graphBoost ||
 						(a.item.lexicalRank ?? Number.POSITIVE_INFINITY) -
 							(b.item.lexicalRank ?? Number.POSITIVE_INFINITY) ||
 						(a.item.semanticRank ?? Number.POSITIVE_INFINITY) -
@@ -341,7 +310,7 @@ async function searchInternal(
 						Boolean(seen.add(item.row.manas_id)),
 				)
 				.slice(0, limit)
-				.map(({ item, unboosted, graphBoost, facts, final }) => ({
+				.map(({ item, unboosted, graphBoost, facts, final, sourcePriority }) => ({
 					manasId: item.row.manas_id,
 					path: item.row.relative_path,
 					title: item.row.title,
@@ -359,6 +328,7 @@ async function searchInternal(
 									lexicalRank: item.lexicalRank,
 									semanticRank: item.semanticRank,
 									unboostedScore: unboosted,
+									sourcePriority,
 									graphBoost,
 									graphContributions: facts.map((fact) => ({
 										...fact,

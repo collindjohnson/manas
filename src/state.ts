@@ -14,7 +14,7 @@ export interface SyncState {
 	version: 1;
 	lastReport?: SyncReport;
 	fingerprints: Record<string, string>;
-	sourceCheckpoints?: Record<string, { updatedAt?: string }>;
+	sourceCheckpoints?: Record<string, { updatedAt?: string; cursor?: string }>;
 }
 
 export async function ensureStateRoot(root: string): Promise<void> {

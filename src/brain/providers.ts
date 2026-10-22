@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { EmbeddingInputType } from "@manas/model";
 
 export interface EmbeddingModel {
 	id: string;
@@ -8,7 +9,7 @@ export interface EmbeddingModel {
 
 export interface EmbeddingProvider {
 	model: EmbeddingModel;
-	embed(texts: string[]): Promise<number[][]>;
+	embed(texts: string[], inputType?: EmbeddingInputType): Promise<number[][]>;
 }
 
 export interface RerankerProvider {
@@ -18,7 +19,7 @@ export interface RerankerProvider {
 
 export interface GenerationProvider {
 	id: string;
-	generate(prompt: string): Promise<string>;
+	generate(prompt: string, options?: { format: "json" }): Promise<string>;
 }
 
 export interface TranscriptionProvider {
@@ -68,34 +69,57 @@ function requestOptions(options: ProviderRequestOptions | undefined): Required<P
 }
 
 async function providerRequest(
-	fetcher: typeof fetch,
-	input: RequestInfo | URL,
-	init: RequestInit,
-	timeoutMs: number,
-	kind: string,
+ fetcher: typeof fetch,
+ input: RequestInfo | URL,
+ init: RequestInit,
+ timeoutMs: number,
+ kind: string,
 ): Promise<Response> {
-	const controller = new AbortController();
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => {
-			controller.abort();
-			reject(new Error(`${kind} provider request timed out`));
-		}, timeoutMs);
-	});
-	try {
-		return await Promise.race([
-			fetcher(input, { ...init, signal: controller.signal }),
-			timeout,
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
+ const controller = new AbortController();
+ let timer: ReturnType<typeof setTimeout> | undefined;
+ let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+ const maximumBytes = 16 * 1024 * 1024;
+ const timeout = new Promise<never>((_resolve, reject) => {
+  timer = setTimeout(() => {
+   controller.abort();
+   void reader?.cancel().catch(() => {});
+   reject(new Error(`${kind} provider request timed out`));
+  }, timeoutMs);
+ });
+ const request = async () => {
+  const response = await fetcher(input, { ...init, redirect: "error", signal: controller.signal });
+  if (!response.body) return response;
+  reader = response.body.getReader();
+  let bytes = 0;
+  const chunks: Uint8Array[] = [];
+  while (true) {
+   const chunk = await reader.read();
+   if (chunk.done) break;
+   bytes += chunk.value.byteLength;
+   if (bytes > maximumBytes) throw new Error(`${kind} provider response exceeded 16 MiB`);
+   chunks.push(chunk.value);
+  }
+  // These providers consume JSON, not streaming completions. Keep the deadline
+  // active through the complete body, then give callers an independently readable response.
+  return new Response(bytes ? Buffer.concat(chunks, bytes) : null, { status: response.status, statusText: response.statusText, headers: response.headers });
+ };
+ try { return await Promise.race([request(), timeout]); }
+ catch (error) { controller.abort(); void reader?.cancel().catch(() => {}); throw error; }
+ finally {
+  if (timer) clearTimeout(timer);
+  try { reader?.releaseLock(); } catch { /* A cancelled read may still be settling. */ }
+ }
 }
 
 export function modelFingerprint(descriptor: ModelDescriptor): string {
 	if (!descriptor.provider.trim() || !descriptor.model.trim()) throw new Error("invalid model descriptor");
 	if (descriptor.dimensions !== undefined && (!Number.isInteger(descriptor.dimensions) || descriptor.dimensions < 1)) throw new Error("invalid model dimensions");
 	return createHash("sha256").update(JSON.stringify({ kind: descriptor.kind, provider: descriptor.provider, model: descriptor.model, revision: descriptor.revision ?? "", dimensions: descriptor.dimensions ?? null, normalized: descriptor.normalized ?? true, templateVersion: descriptor.templateVersion ?? "1", privacy: descriptor.privacy })).digest("hex");
+}
+
+// Version the retrieval template separately from the model's vector width.
+export function embeddingTemplateVersion(model: string): string | undefined {
+	return model.split(":")[0] === "embeddinggemma-2" ? "embeddinggemma-retrieval-v1" : undefined;
 }
 
 function assertModelEndpoint(endpoint: string, privacy: "local" | "hosted", kind: string): void {
@@ -126,12 +150,13 @@ export async function diagnoseProvider(options: { endpoint: string; privacy?: "l
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetcher(url, { method: "GET", signal: controller.signal });
+		const response = await fetcher(url, { method: "GET", redirect: "error", signal: controller.signal });
 		return { endpoint: options.endpoint, protocol, privacy, reachable: response.ok, status: response.status, latencyMs: Date.now() - started, ...(response.ok ? {} : { error: `provider returned HTTP ${response.status}` }) };
 	} catch (error) {
 		return { endpoint: options.endpoint, protocol, privacy, reachable: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message.slice(0, 200) : "provider request failed" };
 	} finally {
 		clearTimeout(timeout);
+		controller.abort();
 	}
 }
 
@@ -140,14 +165,19 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
 	constructor(readonly model: EmbeddingModel, private readonly endpoint: string, private readonly apiKey?: string, privacy: "local" | "hosted" = "local", options?: ProviderRequestOptions) {
 		assertModelEndpoint(endpoint, privacy, "embedding");
 		this.request = requestOptions(options);
+		const templateVersion = embeddingTemplateVersion(model.id);
+		if (templateVersion && !model.fingerprint) this.model = { ...model, fingerprint: modelFingerprint({ kind: "embedding", provider: "openai-compatible", model: model.id, dimensions: model.dimensions, templateVersion, privacy }) };
 	}
 
-	async embed(texts: string[]): Promise<number[][]> {
+	async embed(texts: string[], inputType: EmbeddingInputType = "document"): Promise<number[][]> {
 		if (!texts.length) return [];
+		const input = embeddingTemplateVersion(this.model.id)
+			? texts.map((text) => `${inputType === "query" ? "task: search result | query: " : "title: none | text: "}${text}`)
+			: texts;
 		const response = await providerRequest(this.request.fetcher, this.endpoint, {
 			method: "POST",
 			headers: { "content-type": "application/json", ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}) },
-			body: JSON.stringify({ model: this.model.id, input: texts }),
+			body: JSON.stringify({ model: this.model.id, input }),
 		}, this.request.timeoutMs, "embedding");
 		if (!response.ok) throw new Error("embedding provider request failed");
 		const payload = await response.json() as { data?: Array<{ embedding?: unknown }> };
@@ -199,12 +229,12 @@ export class OpenAiCompatibleGenerationProvider implements GenerationProvider {
 		this.fingerprint = modelFingerprint({ kind: "generation", provider: descriptor.provider ?? "openai-compatible", model: id, revision: descriptor.revision, dimensions: descriptor.dimensions, normalized: descriptor.normalized, templateVersion: descriptor.templateVersion, privacy });
 	}
 
-	async generate(prompt: string): Promise<string> {
+	async generate(prompt: string, options?: { format: "json" }): Promise<string> {
 		if (!prompt.trim() || prompt.length > 100_000) throw new Error("invalid generation prompt");
 		const response = await providerRequest(this.request.fetcher, this.endpoint, {
 			method: "POST",
 			headers: { "content-type": "application/json", ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}) },
-			body: JSON.stringify({ model: this.id, messages: [{ role: "user", content: prompt }], temperature: 0 }),
+			body: JSON.stringify({ model: this.id, messages: [{ role: "user", content: prompt }], temperature: 0, ...(options?.format === "json" ? { response_format: { type: "json_object" } } : {}) }),
 		}, this.request.timeoutMs, "generation");
 		if (!response.ok) throw new Error("generation provider request failed");
 		const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };

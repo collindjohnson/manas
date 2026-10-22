@@ -23,6 +23,7 @@ export type ParityJobType = (typeof PARITY_JOB_TYPES)[number];
 type Store = BrainStore;
 
 export interface JobHandlerContext {
+	repository?: BrainRepository;
 	store: Store;
 	workerId: string;
 	tenantId?: string;
@@ -167,10 +168,10 @@ async function executeBuiltIn(context: JobHandlerContext, type: ParityJobType, j
 		const brainId = typeof payload.brainId === "string" && payload.brainId.trim() ? payload.brainId : "local";
 		const schemaPack = payload.schemaPack && typeof payload.schemaPack === "object" && !Array.isArray(payload.schemaPack) ? payload.schemaPack as { id: string; version: string } : undefined;
 		const lifecycle = createPgliteIngestionRunLifecycle(context.store, job.tenantId, brainId, schemaPack, payload.repositoryRoot);
-		const result = await syncSource({ id: payload.sourceId, describe: () => descriptor, list: async () => documents }, new BrainRepository(payload.repositoryRoot), undefined, createAuditQuarantineSink(context.store, job.tenantId), lifecycle);
+		const result = await syncSource({ id: payload.sourceId, describe: () => descriptor, list: async () => documents }, context.repository ?? new BrainRepository(payload.repositoryRoot), undefined, createAuditQuarantineSink(context.store, job.tenantId), lifecycle);
 		return { sourceSynchronization: result, sourceId: payload.sourceId, brainId };
 	}
-	if (type === "reports") return { report: runAdvancedEvaluation() };
+	if (type === "reports") return { report: await runAdvancedEvaluation() };
 	if (type === "trajectories") {
 		if (typeof payload.id !== "string" || !Array.isArray(payload.events)) throw new Error("trajectory job requires id and events");
 		return { trajectory: buildTrajectory(payload.id, payload.events as never, typeof payload.maximumEvents === "number" ? payload.maximumEvents : undefined) };
@@ -344,7 +345,7 @@ export class DurableJobHandlerRegistry {
 		else if (type === "indexing" || type === "projection-repair") {
 			const payload = payloadObject(executableJob);
 			if (typeof payload.repositoryRoot !== "string" || !payload.repositoryRoot.trim()) throw new Error(`${type} job requires repositoryRoot`);
-			result = await indexBrainRepository(this.context.store, new BrainRepository(payload.repositoryRoot)) as unknown as Record<string, unknown>;
+			result = await indexBrainRepository(this.context.store, this.context.repository ?? new BrainRepository(payload.repositoryRoot)) as unknown as Record<string, unknown>;
 		} else if (this.context.executors?.[type]) result = await this.context.executors[type]!(executableJob);
 		else if (this.context.onExecute) result = await this.context.onExecute(type, executableJob);
 		else {

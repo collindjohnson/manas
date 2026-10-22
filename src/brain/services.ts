@@ -1,3 +1,5 @@
+import { canonicalRead, canonicalSearchOutcome } from "../canonical-services";
+import { assertLocalInferenceConfig } from "./local-inference";
 import * as sourceModule from "../sync";
 import { access, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -26,10 +28,21 @@ export async function searchService(
 	if (!query.trim())
 		throw new Error("search query must contain letters or numbers");
 	validateServiceSearch(options);
+	const canonical = await canonicalRead(config, "retrieval.search", { query, options });
+	if (canonical !== undefined) return canonicalSearchOutcome(canonical as Parameters<typeof canonicalSearchOutcome>[0], options);
 	return searchArchiveOutcome(config, query, options);
 }
 
 export async function thinkService(config: Config, question: string) {
+	assertLocalInferenceConfig(config);
+	const canonical = await canonicalRead(config, "reasoning.answer", { question });
+	if (canonical !== undefined) {
+		const result = canonical as import("./reasoning").ReasonedAnswer & { outcome: "answered" | "insufficient_evidence" | "synthesis_failed"; code?: string };
+		const shared = { evidence: [] as import("../model").SearchResult[], citations: result.citations.map((citation) => ({ ...citation, manasId: citation.documentId })), knowledgeGaps: result.knowledgeGaps };
+		if (result.outcome === "answered" && result.answer) return { ...shared, outcome: "answered" as const, answer: result.answer };
+		if (result.outcome === "insufficient_evidence") return { ...shared, outcome: "insufficient_evidence" as const, code: "insufficient_evidence" as const };
+		return { ...shared, outcome: "synthesis_failed" as const, code: result.code === "local_model_not_configured" ? "local_model_not_configured" as const : "grounding_failed" as const };
+	}
 	const configured = config.providers?.generation ?? (config.brain?.generationEndpoint && config.brain.generationModel ? {
 		endpoint: config.brain.generationEndpoint,
 		model: config.brain.generationModel,
@@ -44,6 +57,8 @@ export async function thinkService(config: Config, question: string) {
 
 export async function getService(config: Config, manasId: string) {
 	if (!manasId) throw new Error("document not found");
+	const canonical = await canonicalRead(config, "retrieval.get", { id: manasId });
+	if (canonical !== undefined) return (canonical as { content: string }).content;
 	const database = await openBrainDatabase(config.brain!.databasePath);
 	try {
 		const row = database
@@ -64,6 +79,8 @@ export async function getService(config: Config, manasId: string) {
 
 export async function relatedService(config: Config, manasId: string) {
 	if (!manasId) throw new Error("document not found");
+	const canonical = await canonicalRead(config, "retrieval.related", { id: manasId });
+	if (canonical !== undefined) return canonical as Awaited<ReturnType<typeof relatedDocuments>>;
 	const database = await openBrainDatabase(config.brain!.databasePath);
 	try {
 		return relatedDocuments(database, manasId);
@@ -74,6 +91,11 @@ export async function relatedService(config: Config, manasId: string) {
 
 /** Status deliberately performs no network dependency checks. */
 export async function statusService(config: Config) {
+	const canonical = await canonicalRead(config, "brain_status", {});
+	if (canonical !== undefined) {
+		const status = canonical as { head: string; settings: unknown; pages: { active: number; deleted: number } };
+		return { ...status, documents: status.pages.active, mode: "canonical", warnings: [] as string[] };
+	}
 	const folders = new Map<string, number>();
 	let documents = 0;
 	let truncated = false;
@@ -132,12 +154,14 @@ export async function statusService(config: Config) {
 		newestArchivedChatTimestamp: archiveAvailable ? await newestArchive() : undefined,
 		newestSourceChatTimestamp: newestSourceTimestamp,
 		zeroEntropy: config.brain
-			? { collection: config.brain.zeroEntropyCollection, configured: true }
+			? { collection: config.brain.zeroEntropyCollection, configured: false, enabled: false, status: "disabled" as const }
 			: undefined,
 		warnings: [...warnings, ...(truncated ? ["archive metadata count reached its limit"] : [])],
 	};
 }
 
 export async function healthService(config: Config) {
+	const canonical = await canonicalRead(config, "integrity.check", {});
+	if (canonical !== undefined) { const result = canonical as { repository: { valid: boolean } }; return { ok: result.repository.valid, mode: "canonical", ...result }; }
 	return brainHealth(config);
 }

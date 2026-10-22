@@ -1,3 +1,4 @@
+import { searchWithRegistry } from "../canonical-services";
 import { BrainRepository } from "../brain/repository";
 import { FilesystemSourceAdapter } from "../sources/filesystem";
 import { syncSource } from "../sources/sync";
@@ -214,7 +215,7 @@ function stringArgument(args: Record<string, unknown>, name: string): string {
 	if (typeof args[name] !== "string" || !args[name]) throw new Error("invalid params");
 	return args[name] as string;
 }
-async function handleMcpLine(config: Config, options: { operationRegistry?: OperationRegistry }, line: string, signal: AbortSignal): Promise<void> {
+async function handleMcpLine(config: Config, options: { operationRegistry?: OperationRegistry; catalogOnly?: boolean }, line: string, signal: AbortSignal): Promise<void> {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(line);
@@ -241,7 +242,7 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 					capabilities: { tools: {} },
 					serverInfo: { name: "manas", version: MANAS_VERSION },
 				};
-			else if (request.method === "tools/list") result = { tools: advertisedTools(options.operationRegistry) };
+			else if (request.method === "tools/list") result = { tools: options.catalogOnly ? options.operationRegistry?.list().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) ?? [] : advertisedTools(options.operationRegistry) };
 			else if (request.method === "tools/call") {
 				if (
 					!isRecord(request.params) ||
@@ -262,13 +263,15 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 				}
 				if (operationHandled) {
 					// The shared registry has already validated and executed this operation.
+				} else if (options.catalogOnly) {
+					throw new errorsModule.McpClientPermissionError();
 				} else if (operationsModule.isBrainRepositoryOperation(name)) {
 					result = await localOperationRegistry().execute({ scope: "admin", principal: "local" }, name, args);
 				} else if (name === "search") {
 					only(args, Object.keys(searchProperties));
 					if (typeof args.query !== "string" || !args.query.trim())
 						throw new Error("invalid params");
-					const options: SearchOptions = {};
+					const searchOptions: SearchOptions = {};
 					if (
 						(args.limit !== undefined &&
 							(typeof args.limit !== "number" ||
@@ -301,19 +304,19 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 						"before",
 					] as const)
 						if (args[key] !== undefined)
-							(options as Record<string, unknown>)[key] = args[key];
+							(searchOptions as Record<string, unknown>)[key] = args[key];
 					if (
 						args.mode !== undefined &&
 						!["hybrid", "keyword", "semantic"].includes(String(args.mode))
 					)
 						throw new Error("invalid params");
-					if (args.mode) options.mode = args.mode as SearchMode;
-					result = await searchService(config, args.query, options);
+					if (args.mode) searchOptions.mode = args.mode as SearchMode;
+					result = options.operationRegistry ? await searchWithRegistry(options.operationRegistry, args.query, searchOptions) : await searchService(config, args.query, searchOptions);
 				} else if (name === "think") {
 					only(args, ["question"]);
 					if (typeof args.question !== "string" || !args.question.trim())
 						throw new Error("invalid params");
-					result = await thinkService(config, args.question);
+					result = options.operationRegistry ? await options.operationRegistry.execute({ scope: "read", principal: "local" }, "reasoning.answer", { question: args.question }) : await thinkService(config, args.question);
 				} else if (name === "get_page") {
 					only(args, ["path", "includeDeleted"]);
 					if (args.includeDeleted !== undefined && typeof args.includeDeleted !== "boolean") throw new Error("invalid params");
@@ -419,7 +422,7 @@ async function handleMcpLine(config: Config, options: { operationRegistry?: Oper
 		}
 }
 
-export async function serveMcp(config: Config, options: { operationRegistry?: OperationRegistry } = {}): Promise<void> {
+export async function serveMcp(config: Config, options: { operationRegistry?: OperationRegistry; catalogOnly?: boolean } = {}): Promise<void> {
 	const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 	const requests = new Map<string, AbortController>();
 	const pending = new Set<Promise<void>>();

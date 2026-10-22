@@ -1,7 +1,9 @@
+import { assertLocalInferenceConfig } from "./local-inference";
 import type { Database } from "bun:sqlite";
 import type { Config } from "@manas/config";
 import { cosineSimilarity, deserializeVector, normalizeVector, serializeVector } from "@manas-brain-vector";
-import { modelFingerprint, OpenAiCompatibleEmbeddingProvider, type EmbeddingProvider } from "@manas-brain-providers";
+import { embeddingTemplateVersion, modelFingerprint, OpenAiCompatibleEmbeddingProvider, type EmbeddingProvider } from "@manas-brain-providers";
+import { archiveSourcePriority } from "@manas-brain-search-quality";
 
 export interface LocalArchiveRow {
 	chunk_id: string;
@@ -28,6 +30,7 @@ export function archiveEmbeddingModelIdentity(provider: EmbeddingProvider): stri
 }
 
 export function configuredArchiveEmbeddingProvider(config: Config): EmbeddingProvider | undefined {
+	assertLocalInferenceConfig(config);
 	const configured = config.providers?.embedding;
 	if (!configured) return undefined;
 	if (configured.dimensions === undefined) throw new Error("configured embedding provider dimensions are required");
@@ -37,6 +40,7 @@ export function configuredArchiveEmbeddingProvider(config: Config): EmbeddingPro
 		model: configured.model,
 		revision: configured.revision,
 		dimensions: configured.dimensions,
+		templateVersion: embeddingTemplateVersion(configured.model),
 		privacy: configured.privacy,
 	};
 	const model = {
@@ -66,7 +70,7 @@ export async function indexArchiveEmbeddings(
 	let embedded = 0;
 	for (let start = 0; start < rows.length; start += batchSize) {
 		const batch = rows.slice(start, start + batchSize);
-		const vectors = await provider.embed(batch.map((row) => row.text));
+		const vectors = await provider.embed(batch.map((row) => row.text), "document");
 		if (vectors.length !== batch.length) throw new Error("embedding provider returned an invalid batch");
 		const insert = database.prepare(
 			"INSERT OR REPLACE INTO local_chunk_embeddings (chunk_id, model_fingerprint, dimensions, embedding, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -96,7 +100,7 @@ export async function searchArchiveEmbeddings(
 		before?: string;
 	},
 ): Promise<LocalArchiveEmbeddingHit[]> {
-	const [rawVector] = await provider.embed([query]);
+	const [rawVector] = await provider.embed([query], "query");
 	if (!rawVector || rawVector.length !== provider.model.dimensions) throw new Error("embedding provider returned an invalid vector");
 	const queryVector = normalizeVector(rawVector);
 	const clauses = ["e.model_fingerprint = ?", "e.dimensions = ?"];
@@ -126,7 +130,7 @@ export async function searchArchiveEmbeddings(
 	).all(...values) as Array<LocalArchiveRow & { embedding: Uint8Array; dimensions: number }>;
 	return rows
 		.map(({ embedding, dimensions, ...row }) => ({ row, score: cosineSimilarity(queryVector, deserializeVector(embedding, dimensions)) }))
-		.sort((left, right) => right.score - left.score || left.row.relative_path.localeCompare(right.row.relative_path) || left.row.chunk_id.localeCompare(right.row.chunk_id))
+		.sort((left, right) => archiveSourcePriority(right.row.title, query) - archiveSourcePriority(left.row.title, query) || right.score - left.score || left.row.relative_path.localeCompare(right.row.relative_path) || left.row.chunk_id.localeCompare(right.row.chunk_id))
 		.slice(0, limit);
 }
 

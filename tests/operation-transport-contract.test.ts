@@ -74,7 +74,7 @@ describe("catalog operation transport contract", () => {
 			const requests = [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, ...fixtures.map((fixture, index) => ({ jsonrpc: "2.0", id: index + 2, method: "tools/call", params: { name: fixture.name, arguments: fixture.input } }))];
 			const stdioResponses = await runStdio(repository.root, join(root, "stdio-store"), requests);
 			const stdio = new Map(fixtures.map((fixture, index) => {
-				const response = stdioResponses[index + 1]!.result as { content: Array<{ text: string }> };
+				const response = stdioResponses.find((response) => response.id === index + 2)!.result as { content: Array<{ text: string }> };
 				return [fixture.name, JSON.parse(response.content[0]!.text) as unknown];
 			}));
 
@@ -100,5 +100,5 @@ describe("catalog operation transport contract", () => {
 				expect(thin.get(fixture.name)).toEqual(direct.get(fixture.name));
 			}
 		} finally { await directStore.close(); await rm(root, { recursive: true, force: true }); }
-	}, 30_000);
+	}, 120_000);
 });

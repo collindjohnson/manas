@@ -139,6 +139,7 @@ export interface SearchExplanation {
 	lexicalRank?: number;
 	semanticRank?: number;
 	unboostedScore: number;
+	sourcePriority?: number;
 	graphBoost: number;
 	graphContributions?: GraphContribution[];
 	degradation?: string;

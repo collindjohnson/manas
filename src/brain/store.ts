@@ -1,3 +1,4 @@
+import { acquireStoreOwnership } from "./ownership";
 import { PGlite, type Extension, type PGliteOptions } from "@electric-sql/pglite";
 import pgliteDataPath from "@manas-pglite-assets/pglite.data" with { type: "file" };
 import pgliteWasmPath from "@manas-pglite-assets/pglite.wasm" with { type: "file" };
@@ -70,7 +71,7 @@ export class SerializedBrainStore implements BrainStore {
 	}
 }
 
-export const BRAIN_STORE_SCHEMA_VERSION = 24;
+export const BRAIN_STORE_SCHEMA_VERSION = 31;
 
 
 export const BRAIN_STORE_SCHEMA = `
@@ -728,6 +729,84 @@ export const BRAIN_STORE_MIGRATIONS: DatabaseMigration[] = [
 	sqlMigration(22, "durable-skill-feedback", BRAIN_STORE_SKILL_FEEDBACK_SCHEMA, verifySkillFeedbackSchema),
 	sqlMigration(23, "durable-admin-action-receipts", BRAIN_STORE_ADMIN_ACTION_SCHEMA, verifyAdminActionSchema),
 	sqlMigration(24, "single-owner-scheduler-leases", BRAIN_STORE_SCHEDULER_SCHEMA, verifySchedulerSchema),
+	sqlMigration(25, "durable-agent-capture-turns", `CREATE TABLE IF NOT EXISTS brain_capture_turns (
+ id text PRIMARY KEY, tenant_id text NOT NULL DEFAULT 'local', brain_id text NOT NULL, installation_id text NOT NULL, session_id text NOT NULL,
+ turn_id text NOT NULL, prompt text NOT NULL, prompt_hash text NOT NULL,
+ visibility jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS brain_capture_turns_installation ON brain_capture_turns (installation_id,session_id,turn_id);`, async (store) => { await store.query("SELECT prompt_hash,visibility FROM brain_capture_turns LIMIT 1"); }),
+
+	sqlMigration(26, "capture-grant-epochs", "ALTER TABLE brain_capture_turns ADD COLUMN IF NOT EXISTS capture_epoch text NOT NULL DEFAULT 'legacy';", async (store) => { await store.query("SELECT capture_epoch FROM brain_capture_turns LIMIT 1"); }),
+ sqlMigration(27, "answer-receipts-and-feedback", `CREATE TABLE IF NOT EXISTS brain_answer_receipts (
+ id text PRIMARY KEY, tenant_id text NOT NULL, brain_id text NOT NULL, principal text NOT NULL,
+ pin_id text, pin_revision text, receipt jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS brain_answer_receipts_pin ON brain_answer_receipts (tenant_id,brain_id,pin_id,pin_revision,created_at);
+CREATE TABLE IF NOT EXISTS brain_answer_feedback (
+ id text PRIMARY KEY, tenant_id text NOT NULL, brain_id text NOT NULL, principal text NOT NULL,
+ answer_id text NOT NULL REFERENCES brain_answer_receipts(id), rating integer NOT NULL CHECK (rating BETWEEN -1 AND 1),
+ evidence jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE (tenant_id,brain_id,principal,answer_id)
+);`, async (store) => { await store.query("SELECT receipt FROM brain_answer_receipts LIMIT 1"); await store.query("SELECT evidence FROM brain_answer_feedback LIMIT 1"); }),
+
+ sqlMigration(28, "google-ingestion-journal", `CREATE TABLE IF NOT EXISTS brain_google_sources (
+ id text NOT NULL,tenant_id text NOT NULL,brain_id text NOT NULL,boundary jsonb NOT NULL,revision text NOT NULL,
+ enabled boolean NOT NULL DEFAULT true,cursor jsonb,checkpoint_sequence bigint NOT NULL DEFAULT 0,reconciliation_id text,
+ worker_id text,lease_expires_at timestamptz,last_success_at timestamptz,last_error text,
+ PRIMARY KEY (tenant_id,brain_id,id)
+);
+CREATE TABLE IF NOT EXISTS brain_google_batches (
+ id text PRIMARY KEY,tenant_id text NOT NULL,brain_id text NOT NULL,source_id text NOT NULL,cursor_hash text NOT NULL,
+ page jsonb NOT NULL,applied integer NOT NULL DEFAULT 0,reconciliation_id text,status text NOT NULL DEFAULT 'pending',
+ created_at timestamptz NOT NULL DEFAULT now(),completed_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS brain_google_batches_source ON brain_google_batches (tenant_id,brain_id,source_id,status);
+CREATE TABLE IF NOT EXISTS brain_google_seen (
+ tenant_id text NOT NULL,brain_id text NOT NULL,source_id text NOT NULL,reconciliation_id text NOT NULL,external_id text NOT NULL,
+ PRIMARY KEY (tenant_id,brain_id,source_id,reconciliation_id,external_id)
+);
+CREATE TABLE IF NOT EXISTS brain_google_attempts (
+ id text PRIMARY KEY,tenant_id text NOT NULL,brain_id text NOT NULL,source_id text NOT NULL,batch_id text NOT NULL,
+ error_code text NOT NULL,retryable boolean NOT NULL,retry_after_ms integer NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);`, async (store) => { await store.query("SELECT cursor,checkpoint_sequence FROM brain_google_sources LIMIT 1"); await store.query("SELECT applied FROM brain_google_batches LIMIT 1"); await store.query("SELECT external_id FROM brain_google_seen LIMIT 1"); await store.query("SELECT error_code FROM brain_google_attempts LIMIT 1"); }),
+
+ sqlMigration(29, "catalog-executions", `CREATE TABLE IF NOT EXISTS brain_catalog_executions (
+ id text PRIMARY KEY, tenant_id text NOT NULL, brain_id text NOT NULL, principal text NOT NULL,
+ request_hash text NOT NULL, status text NOT NULL CHECK(status IN ('pending','running','complete','failed','cancelled')),
+ plan jsonb NOT NULL, budget jsonb NOT NULL, managed_writes boolean NOT NULL DEFAULT false,
+ items_used integer NOT NULL DEFAULT 0 CHECK(items_used>=0), tokens_reserved integer NOT NULL DEFAULT 0 CHECK(tokens_reserved>=0),
+ runtime_reserved_ms integer NOT NULL DEFAULT 0 CHECK(runtime_reserved_ms>=0),
+ current_job_id text NOT NULL, worker_id text, lease_expires_at timestamptz,
+ last_error text, retryable boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS brain_catalog_executions_scope ON brain_catalog_executions (tenant_id,brain_id,created_at,id);
+CREATE TABLE IF NOT EXISTS brain_catalog_execution_steps (
+ execution_id text NOT NULL REFERENCES brain_catalog_executions(id), ordinal integer NOT NULL CHECK(ordinal>=0),
+ tenant_id text NOT NULL, brain_id text NOT NULL, operation text NOT NULL, input jsonb, input_hash text,
+ status text NOT NULL CHECK(status IN ('pending','running','complete','failed')), attempts integer NOT NULL DEFAULT 0,
+ result jsonb, result_hash text, error_code text, input_tokens integer NOT NULL DEFAULT 0,
+ output_tokens integer NOT NULL DEFAULT 0, duration_ms integer NOT NULL DEFAULT 0,
+ started_at timestamptz, completed_at timestamptz,
+ PRIMARY KEY (execution_id,ordinal)
+);`, async (store) => { await store.query("SELECT tokens_reserved FROM brain_catalog_executions LIMIT 1"); await store.query("SELECT result_hash FROM brain_catalog_execution_steps LIMIT 1"); }),
+
+ sqlMigration(30, "maintenance-analysis", `CREATE TABLE IF NOT EXISTS brain_maintenance_analysis (
+ tenant_id text NOT NULL,brain_id text NOT NULL,document_id text NOT NULL,revision text NOT NULL,analyzer text NOT NULL,
+ findings jsonb NOT NULL,completed boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,brain_id,document_id,revision,analyzer)
+ );`, async (store) => { await store.query("SELECT findings,completed FROM brain_maintenance_analysis LIMIT 1"); }),
+
+ sqlMigration(31, "owner-browser-sessions", `CREATE TABLE IF NOT EXISTS brain_owner_sessions (
+ session_hash text PRIMARY KEY,tenant_id text NOT NULL,brain_id text NOT NULL,origin text NOT NULL,csrf_hash text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),last_seen_at timestamptz NOT NULL DEFAULT now(),
+ idle_expires_at timestamptz NOT NULL,absolute_expires_at timestamptz NOT NULL,revoked_at timestamptz
+ );
+ CREATE INDEX IF NOT EXISTS brain_owner_sessions_scope ON brain_owner_sessions(tenant_id,brain_id,absolute_expires_at);`,
+ async (store) => { await store.query("SELECT origin,csrf_hash FROM brain_owner_sessions LIMIT 1"); }),
+
 ];
 
 type QueryableDatabase = Pick<PGlite, "query" | "exec"> & { close?: () => Promise<void> };
@@ -755,13 +834,21 @@ class PGliteBrainStore implements BrainStore {
 }
 
 export async function openPgliteBrainStore(dataDirectory?: string): Promise<BrainStore> {
-	const options = await pgliteOptions();
-	const database = dataDirectory
-		? new PGlite(dataDirectory, options)
-		: new PGlite(options);
-	await database.waitReady;
-	await database.exec("CREATE EXTENSION IF NOT EXISTS vector");
-	const store = new SerializedBrainStore(new PGliteBrainStore(database));
-	await runDatabaseMigrations(store, BRAIN_STORE_MIGRATIONS);
-	return store;
+	const release = dataDirectory ? await acquireStoreOwnership(dataDirectory) : undefined;
+	let database: PGlite | undefined;
+	try {
+		const options = await pgliteOptions();
+		database = dataDirectory ? new PGlite(dataDirectory, options) : new PGlite(options);
+		await database.waitReady;
+		await database.exec("CREATE EXTENSION IF NOT EXISTS vector");
+		const store = new SerializedBrainStore(new PGliteBrainStore(database));
+		await runDatabaseMigrations(store, BRAIN_STORE_MIGRATIONS);
+		const close = store.close.bind(store);
+		let closing: Promise<void> | undefined;
+		store.close = () => closing ??= close().finally(() => release?.());
+		return store;
+	} catch (error) {
+		try { await database?.close(); } finally { release?.(); }
+		throw error;
+	}
 }

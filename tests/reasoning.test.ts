@@ -19,3 +19,14 @@ describe("grounded reasoning contract", () => {
 		expect(buildReasonedAnswer({ answer: "guess", evidence: [] })).toEqual({ citations: [], confidence: 0, contradictions: [], staleEvidence: [], knowledgeGaps: ["No verified evidence was available."] });
 	});
 });
+
+test("generation rejects invented citations and evidence changed during generation", async () => {
+ const { generateGroundedAnswer } = await import("../src/brain/reasoning");
+ const evidence = [{ text: "Owner: Alice", citation: citation("one") }];
+ const invented = await generateGroundedAnswer({ question: "Who owns it?", evidence, provider: { generate: async () => JSON.stringify({ answer: "Alice", citations: ["invented"], knowledgeGaps: [] }) } });
+ expect(invented).toMatchObject({ outcome: "synthesis_failed", code: "grounding_failed", citations: [] });
+ const changed = await generateGroundedAnswer({ question: "Who owns it?", evidence, provider: { generate: async () => JSON.stringify({ answer: "Alice", citations: ["one"], knowledgeGaps: [] }) }, verify: async () => { throw new Error("withdrawn"); } });
+ expect(changed).toMatchObject({ outcome: "synthesis_failed", citations: [] });
+ const valid = await generateGroundedAnswer({ question: "Who owns it?", evidence, provider: { generate: async () => JSON.stringify({ answer: "Alice", citations: ["one"], knowledgeGaps: [] }) } });
+ expect(valid).toMatchObject({ outcome: "answered", answer: "Alice", citations: [citation("one")] });
+});

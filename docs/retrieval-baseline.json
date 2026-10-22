@@ -1,0 +1,89 @@
+{
+  "recordedAt": "2026-10-21T07:30:21.151Z",
+  "mode": "local-lexical",
+  "corpus": "manas-retrieval-v1",
+  "corpusHash": "3d471f128c45d23a6861e9db650c3553cb34c6da5529be4e2fce589be4e6c7a7",
+  "cases": 6,
+  "replay": {
+    "cases": 6,
+    "exactMatches": 6,
+    "recall": 1,
+    "precision": 1
+  },
+  "metrics": {
+    "recallAt10": 1,
+    "mrr": 1,
+    "ndcgAt10": 1
+  },
+  "results": [
+    {
+      "id": "cross-session",
+      "expectedIds": [
+        "owner"
+      ],
+      "actualIds": [
+        "owner"
+      ]
+    },
+    {
+      "id": "temporal",
+      "expectedIds": [
+        "decision"
+      ],
+      "actualIds": [
+        "decision"
+      ]
+    },
+    {
+      "id": "code",
+      "expectedIds": [
+        "code"
+      ],
+      "actualIds": [
+        "code"
+      ]
+    },
+    {
+      "id": "authorized",
+      "expectedIds": [
+        "private"
+      ],
+      "actualIds": [
+        "private"
+      ]
+    },
+    {
+      "id": "visibility-denied",
+      "expectedIds": [],
+      "actualIds": []
+    },
+    {
+      "id": "tenant-denied",
+      "expectedIds": [],
+      "actualIds": []
+    }
+  ],
+  "isolated": true,
+  "scorecard": {
+    "id": "retrieval",
+    "metrics": [
+      {
+        "id": "mrr",
+        "value": 1,
+        "weight": 1
+      },
+      {
+        "id": "ndcgAt10",
+        "value": 1,
+        "weight": 1
+      },
+      {
+        "id": "recallAt10",
+        "value": 1,
+        "weight": 1
+      }
+    ],
+    "score": 1
+  },
+  "warnings": []
+}

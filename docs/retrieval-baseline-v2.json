@@ -1,0 +1,681 @@
+{
+  "corpus": "manas-retrieval-v2",
+  "corpusHash": "a50137c618eb3910b2b83752ff9c86ff7c937df7feb55e04fa562736bb5d9397",
+  "inference": "disabled",
+  "suites": [
+    {
+      "split": "development",
+      "cases": 29,
+      "metrics": {
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": 1,
+        "relationshipExactMatch": 1
+      },
+      "safety": {
+        "invalidCitations": 0,
+        "forbiddenResults": 0,
+        "staleProjectionSuppressed": true,
+        "replayStayedWithdrawn": true
+      },
+      "results": [
+        {
+          "id": "cross-session-owner",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner",
+            "session-owner"
+          ],
+          "actualIds": [
+            "memory-owner",
+            "session-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "cross-session-decision",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "noisy-transcript",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "code"
+          ],
+          "actualIds": [
+            "code"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "temporal-user-filter",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "private-denied",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "private-authorized",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "private"
+          ],
+          "actualIds": [
+            "private"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "tenant-denied",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "stale-source",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "expired-search",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "future-search",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "recall-contract",
+          "phase": "initial",
+          "surface": "recall",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdraw-before",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "memory-withdrawn"
+          ],
+          "actualIds": [
+            "memory-withdrawn"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-one-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns"
+          ],
+          "actualIds": [
+            "owns"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-private-intermediate",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-three-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns>belongs-to>based-in"
+          ],
+          "actualIds": [
+            "owns>belongs-to>based-in"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-hop-bound",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-alias-two-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns>belongs-to"
+          ],
+          "actualIds": [
+            "owns>belongs-to"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "old-assertion-suppressed",
+          "phase": "corrected",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "current-assertion",
+          "phase": "corrected",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "current-recall",
+          "phase": "corrected",
+          "surface": "recall",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-search",
+          "phase": "withdrawn",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-recall",
+          "phase": "withdrawn",
+          "surface": "recall",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-graph",
+          "phase": "withdrawn",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "changed-access-denied",
+          "phase": "permission-changed",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "changed-access-authorized",
+          "phase": "permission-changed",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-withdrawal",
+          "phase": "rebuilt",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-correction",
+          "phase": "rebuilt",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-graph",
+          "phase": "rebuilt",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "replayed-capture-withdrawal",
+          "phase": "replayed",
+          "surface": "recall",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        }
+      ]
+    },
+    {
+      "split": "held-out",
+      "cases": 29,
+      "metrics": {
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": 1,
+        "relationshipExactMatch": 1
+      },
+      "safety": {
+        "invalidCitations": 0,
+        "forbiddenResults": 0,
+        "staleProjectionSuppressed": true,
+        "replayStayedWithdrawn": true
+      },
+      "results": [
+        {
+          "id": "cross-session-owner",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner",
+            "session-owner"
+          ],
+          "actualIds": [
+            "memory-owner",
+            "session-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "cross-session-decision",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "noisy-transcript",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "code"
+          ],
+          "actualIds": [
+            "code"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "temporal-user-filter",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "private-denied",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "private-authorized",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "private"
+          ],
+          "actualIds": [
+            "private"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "tenant-denied",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "stale-source",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "expired-search",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "future-search",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "recall-contract",
+          "phase": "initial",
+          "surface": "recall",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdraw-before",
+          "phase": "initial",
+          "surface": "search",
+          "expectedIds": [
+            "memory-withdrawn"
+          ],
+          "actualIds": [
+            "memory-withdrawn"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-one-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns"
+          ],
+          "actualIds": [
+            "owns"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-private-intermediate",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-three-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns>belongs-to>based-in"
+          ],
+          "actualIds": [
+            "owns>belongs-to>based-in"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-hop-bound",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "graph-alias-two-hop",
+          "phase": "initial",
+          "surface": "relationships",
+          "expectedIds": [
+            "owns>belongs-to"
+          ],
+          "actualIds": [
+            "owns>belongs-to"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "old-assertion-suppressed",
+          "phase": "corrected",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "current-assertion",
+          "phase": "corrected",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "current-recall",
+          "phase": "corrected",
+          "surface": "recall",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-search",
+          "phase": "withdrawn",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-recall",
+          "phase": "withdrawn",
+          "surface": "recall",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "withdrawn-graph",
+          "phase": "withdrawn",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "changed-access-denied",
+          "phase": "permission-changed",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "changed-access-authorized",
+          "phase": "permission-changed",
+          "surface": "search",
+          "expectedIds": [
+            "session-decision"
+          ],
+          "actualIds": [
+            "session-decision"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-withdrawal",
+          "phase": "rebuilt",
+          "surface": "search",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-correction",
+          "phase": "rebuilt",
+          "surface": "search",
+          "expectedIds": [
+            "memory-owner"
+          ],
+          "actualIds": [
+            "memory-owner"
+          ],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "rebuild-graph",
+          "phase": "rebuilt",
+          "surface": "relationships",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        },
+        {
+          "id": "replayed-capture-withdrawal",
+          "phase": "replayed",
+          "surface": "recall",
+          "expectedIds": [],
+          "actualIds": [],
+          "invalidCitations": 0,
+          "forbiddenResults": 0
+        }
+      ]
+    }
+  ]
+}

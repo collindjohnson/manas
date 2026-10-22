@@ -19,6 +19,27 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("PGLite brain indexing", () => {
+ test("concurrent worker indexing and catalog catch-up share one projection build", async () => {
+  const root = await mkdtemp(join(tmpdir(), "brain-projection-race-"));
+  roots.push(root);
+  const brain = new BrainRepository(join(root, "brain"));
+  await brain.initialize();
+  const page = await brain.putPage("notes/race.md", "Juniper owner is Maya.");
+  const store = await openPgliteBrainStore();
+  try {
+   const { ensureCurrentBrainProjection } = await import(indexerModule);
+   await Promise.all([
+    indexBrainRepositoryIncremental(store, brain),
+    ensureCurrentBrainProjection(store, brain),
+    indexBrainRepositoryIncremental(store, brain),
+   ]);
+   const snapshot = await brain.snapshot();
+   expect(await store.query("SELECT git_commit FROM brain_active_projection_runs WHERE brain_id = $1", [snapshot.brainId])).toMatchObject([{ git_commit: page.commit }]);
+   expect(await store.query("SELECT status FROM brain_projection_runs WHERE brain_id = $1", [snapshot.brainId])).toMatchObject([{ status: "complete" }]);
+   expect(await searchBrainRepository(store, "Juniper", 20, snapshot.brainId)).toHaveLength(1);
+  } finally { await store.close(); }
+ });
+
 	test("computes a deterministic commit-range projection delta", () => {
 		const previous = [{ id: "a", path: "a.md", contentHash: "one", revision: "1" }, { id: "b", path: "b.md", contentHash: "two", revision: "1" }, { id: "c", path: "c.md", contentHash: "three", revision: "1" }];
 		const target = [{ id: "a", path: "renamed.md", contentHash: "one", revision: "1" }, { id: "b", path: "b.md", contentHash: "new", revision: "2" }, { id: "c", path: "c.md", contentHash: "three", revision: "1", accessLabels: ["team"] }, { id: "d", path: "d.md", contentHash: "four", revision: "1" }];
@@ -188,4 +209,28 @@ describe("PGLite brain indexing", () => {
 			expect(restored.id).toBe(target.id);
 		} finally { await store.close(); }
 	});
+});
+
+test("verified retrieval suppresses Git withdrawals and permission changes before projection rebuild", async () => {
+ const root = await mkdtemp(join(tmpdir(), "manas-current-evidence-"));
+ roots.push(root);
+ const brain = new BrainRepository(join(root, "brain"));
+ await brain.initialize();
+ await execFile("git", ["-C", brain.root, "config", "user.name", "Test"]);
+ await execFile("git", ["-C", brain.root, "config", "user.email", "test@example.invalid"]);
+ const page = await brain.putPage("fact.md", "Telescope ownership belongs to Alice.");
+ const store = await openPgliteBrainStore();
+ try {
+  await indexBrainRepository(store, brain);
+  const initial = await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: [] });
+  expect(initial).toHaveLength(1);
+  const restricted = await brain.setPageAccessLabels(page.path, ["private"], page.revision, page.commit);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: [] })).toEqual([]);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope", { allowedAccessLabels: ["private"] })).toHaveLength(1);
+  await brain.deletePage(page.path, restricted.revision, restricted.commit);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope")).toEqual([]);
+  await expect(resolveBrainCitation(store, brain, initial[0]!.citation)).rejects.toThrow("no longer current");
+  await indexBrainRepository(store, brain);
+  expect(await searchVerifiedHybridBrainRepository(store, brain, "telescope")).toEqual([]);
+ } finally { await store.close(); }
 });

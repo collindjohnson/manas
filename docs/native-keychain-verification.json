@@ -1,0 +1,12 @@
+{
+  "synthetic": true,
+  "put": true,
+  "get": true,
+  "replace": true,
+  "remove": true,
+  "missing": true,
+  "cleanupAccounts": 11,
+  "cleanupVerified": true,
+  "credentialSize": "7000-character synthetic access token, two generations",
+  "limitations": "Production storage helper with the native security interactive stdin protocol. No real OAuth consent, account connection, or Google API requests."
+}

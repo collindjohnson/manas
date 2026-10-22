@@ -168,3 +168,22 @@ describe("source synchronization", () => {
 		} finally { await store.close(); }
 	});
 });
+
+test("a committed file is not rewritten after checkpoint failure and retrievedAt changes", async () => {
+ const { writeFile } = await import("node:fs/promises");
+ const { FilesystemSourceAdapter } = await import("../src/sources/filesystem");
+ const root = await mkdtemp(join(tmpdir(), "brain-source-replay-")); roots.push(root);
+ const sourceRoot = join(root, "input");
+ const { mkdir } = await import("node:fs/promises"); await mkdir(sourceRoot);
+ await writeFile(join(sourceRoot, "note.md"), "durable source");
+ const brain = new BrainRepository(join(root, "brain")); await brain.initialize();
+ await execFile("git", ["-C", brain.root, "config", "user.name", "Test"]);
+ await execFile("git", ["-C", brain.root, "config", "user.email", "test@example.invalid"]);
+ const checkpoints = { get: async () => undefined, set: async () => { throw new Error("checkpoint unavailable"); } };
+ await expect(syncSource(new FilesystemSourceAdapter(sourceRoot), brain, checkpoints)).rejects.toThrow("checkpoint unavailable");
+ const head = await brain.head();
+ let saved: unknown;
+ expect(await syncSource(new FilesystemSourceAdapter(sourceRoot), brain, { get: async () => undefined, set: async (_id: string, value: unknown) => { saved = value; } })).toMatchObject({ created: 0, updated: 0 });
+ expect(await brain.head()).toBe(head);
+ expect(saved).toMatchObject({ cursor: expect.any(String) });
+});

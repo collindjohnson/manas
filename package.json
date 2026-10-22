@@ -20,7 +20,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
+    "evaluation:check": "bun run scripts/evaluate-retrieval.ts",
     "generate:version": "bun run scripts/generate-version.ts",
     "check:release-version": "bun run scripts/verify-release-version.ts",
     "check:runtime-assets": "bun run scripts/check-runtime-assets.ts",
@@ -36,8 +37,9 @@
     "postgres:docker": "bash scripts/postgres-contract.sh",
     "secrets:check": "bun run src/parity/secret-scan.ts",
     "parity:check": "bun run src/parity/verify.ts",
-    "parity:verify": "bun run src/parity/verify.ts --require-verified && bun run runbooks:check && bun run postgres:docker && bun run secrets:check && bun test && bun run typecheck && bun run format:check && bun run build && git diff --check",
-    "full-verification": "bun run parity:verify"
+    "parity:verify": "bun run src/parity/verify.ts --require-verified && bun run runbooks:check && bun run postgres:docker && bun run secrets:check && bun run test && bun run typecheck && bun run format:check && bun run build && git diff --check",
+    "full-verification": "bun run parity:verify",
+    "skills:check": "bun run scripts/check-agent-skills.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

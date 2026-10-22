@@ -93,11 +93,41 @@ export async function materializeDueSchedules(store: Store, tenantId = "local", 
 	return store.transaction(async (transaction) => {
 		const schedules = await transaction.query<ScheduleRow>("SELECT id, tenant_id, type, payload, interval_seconds, next_run_at, enabled FROM brain_job_schedules WHERE tenant_id = $1 AND enabled = true AND next_run_at <= $2 ORDER BY next_run_at ASC", [tenantId, now.toISOString()]);
 		const jobs: BrainJob[] = [];
-		for (const schedule of schedules) {
-			const jobRows = await transaction.query<JobRow>(`INSERT INTO brain_jobs (id, tenant_id, type, payload, status, available_at) VALUES ($1, $2, $3, $4::jsonb, 'pending', $5) RETURNING ${jobColumns}`, [randomUUID(), schedule.tenant_id, schedule.type, typeof schedule.payload === "string" ? schedule.payload : JSON.stringify(schedule.payload), now.toISOString()]);
-			jobs.push(toJob(jobRows[0]!));
-			let next = new Date(schedule.next_run_at);
-			while (next <= now) next = new Date(next.getTime() + schedule.interval_seconds * 1_000);
+        const resource = (row: ScheduleRow) => {
+            const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+            return row.type === "google-source-sync" ? "google:" + JSON.stringify([payload?.brainId, payload?.sourceId]) + ":" + row.id : "other:" + row.id;
+        };
+        schedules.sort((left, right) => resource(left).localeCompare(resource(right)));
+        for (const candidate of schedules) {
+            const candidatePayload = typeof candidate.payload === "string" ? JSON.parse(candidate.payload) : candidate.payload;
+            // Match the source -> schedule lock order used by owner controls. Stable resource
+            // ordering also prevents competing scheduler transactions from reversing source locks.
+            if (candidate.type === "google-source-sync" && candidatePayload && typeof candidatePayload.brainId === "string" && typeof candidatePayload.sourceId === "string") await transaction.query("SELECT id FROM brain_google_sources WHERE tenant_id=$1 AND brain_id=$2 AND id=$3 FOR UPDATE", [tenantId, candidatePayload.brainId, candidatePayload.sourceId]);
+            const locked = await transaction.query<ScheduleRow>("SELECT id,tenant_id,type,payload,interval_seconds,next_run_at,enabled FROM brain_job_schedules WHERE id=$1 AND tenant_id=$2 AND enabled=true AND next_run_at<=$3 FOR UPDATE", [candidate.id, tenantId, now.toISOString()]);
+            const schedule = locked[0];
+            if (!schedule || resource(schedule) !== resource(candidate)) continue;
+            const payload = typeof schedule.payload === "string" ? JSON.parse(schedule.payload) : schedule.payload;
+            let busy = false;
+            if (schedule.type === "google-source-sync") {
+                if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+                    await transaction.query("UPDATE brain_job_schedules SET enabled=false,updated_at=now() WHERE id=$1 AND tenant_id=$2", [schedule.id, tenantId]);
+                    continue;
+                }
+                const selection = payload as { brainId?: string; sourceId?: string; revision?: string };
+                if (![selection.brainId, selection.sourceId, selection.revision].every((value) => typeof value === "string" && value.length > 0 && value.length <= 512)) {
+                    await transaction.query("UPDATE brain_job_schedules SET enabled=false,updated_at=now() WHERE id=$1 AND tenant_id=$2", [schedule.id, tenantId]);
+                    continue;
+                }
+                const valid = await transaction.query("SELECT id FROM brain_google_sources WHERE tenant_id=$1 AND brain_id=$2 AND id=$3 AND revision=$4 AND enabled=true", [tenantId, selection.brainId ?? "", selection.sourceId ?? "", selection.revision ?? ""]);
+                if (!valid.length) {
+                    await transaction.query("UPDATE brain_job_schedules SET enabled=false,updated_at=now() WHERE id=$1 AND tenant_id=$2", [schedule.id, tenantId]);
+                    continue;
+                }
+                busy = (await transaction.query("SELECT id FROM brain_jobs WHERE tenant_id=$1 AND type='google-source-sync' AND status IN ('pending','running') AND payload->>'brainId'=$2 AND payload->>'sourceId'=$3 AND payload->>'revision'=$4 LIMIT 1", [tenantId, selection.brainId!, selection.sourceId!, selection.revision!])).length > 0;
+            }
+            if (!busy) jobs.push(await enqueueJob(transaction, { tenantId: schedule.tenant_id, type: schedule.type, payload, availableAt: now, maxAttempts: schedule.type === "google-source-sync" ? 8 : 3, idempotencyKey: "schedule:" + createHash("sha256").update(schedule.id + ":" + new Date(schedule.next_run_at).toISOString()).digest("hex") }));
+            const previous = new Date(schedule.next_run_at).getTime(), interval = schedule.interval_seconds * 1000;
+            const next = new Date(previous + (Math.floor((now.getTime() - previous) / interval) + 1) * interval);
 			await transaction.query("UPDATE brain_job_schedules SET next_run_at = $2, updated_at = now() WHERE id = $1", [schedule.id, next.toISOString()]);
 		}
 		return jobs;
@@ -149,8 +179,10 @@ export async function renewJobLease(store: Store, id: string, workerId: string, 
 	return toJob(rows[0]!);
 }
 
+const executionCancellationCtes = ", stopped AS (\n UPDATE brain_catalog_executions SET status='cancelled',worker_id=NULL,lease_expires_at=NULL,retryable=false,last_error='execution_cancelled',completed_at=now(),updated_at=now()\n WHERE tenant_id=$2 AND current_job_id IN (SELECT id FROM cancelled) AND status IN ('pending','running') RETURNING id,tenant_id,brain_id\n), stopped_steps AS (\n UPDATE brain_catalog_execution_steps step SET status='failed',error_code='execution_cancelled' FROM stopped run\n WHERE step.execution_id=run.id AND step.tenant_id=run.tenant_id AND step.brain_id=run.brain_id AND step.status='running' RETURNING step.execution_id\n) SELECT id FROM cancelled";
+
 export async function cancelJob(store: Store, id: string, tenantId = "local"): Promise<void> {
-	const rows = await store.query<{ id: string }>("UPDATE brain_jobs SET status = 'cancelled', worker_id = NULL, lease_expires_at = NULL, updated_at = now() WHERE id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') RETURNING id", [id, tenantId]);
+	const rows = await store.query<{ id: string }>("WITH cancelled AS (UPDATE brain_jobs SET status = 'cancelled', worker_id = NULL, lease_expires_at = NULL, updated_at = now() WHERE id = $1 AND tenant_id = $2 AND status IN ('pending', 'running') RETURNING id)" + executionCancellationCtes, [id, tenantId]);
 	if (!rows.length) throw new Error("job cannot be cancelled");
 }
 
@@ -172,8 +204,19 @@ export async function runOneJob(store: Store, workerId: string, handlers: Record
 		await completeJob(store, job.id, workerId, tenantId);
 		return { ...job, status: "complete", workerId: undefined, leaseExpiresAt: undefined };
 	} catch (error) {
-		await failJob(store, job.id, workerId, error instanceof Error ? error.message : "job handler failed", options.retryAt, tenantId);
-		throw error;
+        const cancelled = async () => {
+            const rows = await store.query<JobRow>(`SELECT ${jobColumns} FROM brain_jobs WHERE id=$1 AND tenant_id=$2`, [job.id, tenantId]);
+            return rows[0]?.status === "cancelled" ? toJob(rows[0]) : undefined;
+        };
+        const stopped = await cancelled();
+        if (stopped) return stopped;
+        try { await failJob(store, job.id, workerId, error instanceof Error ? error.message : "job handler failed", (options.retryAt ?? (error && typeof error === "object" && "retryAfterMs" in error && typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0 ? new Date(Date.now() + Math.min(60000, error.retryAfterMs)) : undefined)), tenantId); }
+        catch {
+            const stoppedDuringFailure = await cancelled();
+            if (stoppedDuringFailure) return stoppedDuringFailure;
+            // A lost lease cannot authorize this worker to modify the replacement run.
+        }
+        throw error;
 	}
 }
 
@@ -211,6 +254,6 @@ export async function attachJob(store: Store, input: { jobId: string; tenantId?:
 
 export async function cancelJobTree(store: Store, id: string, tenantId = "local"): Promise<number> {
 	if (!id.trim() || !tenantId.trim()) throw new Error("invalid job cancellation");
-	const rows = await store.query<{ count: string }>("WITH RECURSIVE tree AS (SELECT id FROM brain_jobs WHERE id = $1 AND tenant_id = $2 UNION ALL SELECT child.id FROM brain_jobs child JOIN tree parent ON child.tenant_id = $2 AND child.dependency_ids ? parent.id) UPDATE brain_jobs SET status = 'cancelled', worker_id = NULL, lease_expires_at = NULL, updated_at = now() WHERE tenant_id = $2 AND id IN (SELECT id FROM tree) AND status IN ('pending', 'running') RETURNING id", [id, tenantId]);
+	const rows = await store.query<{ count: string }>("WITH RECURSIVE tree AS (SELECT id FROM brain_jobs WHERE id = $1 AND tenant_id = $2 UNION ALL SELECT child.id FROM brain_jobs child JOIN tree parent ON child.tenant_id = $2 AND child.dependency_ids ? parent.id), cancelled AS (UPDATE brain_jobs SET status = 'cancelled', worker_id = NULL, lease_expires_at = NULL, updated_at = now() WHERE tenant_id = $2 AND id IN (SELECT id FROM tree) AND status IN ('pending', 'running') RETURNING id)" + executionCancellationCtes, [id, tenantId]);
 	return rows.length;
 }

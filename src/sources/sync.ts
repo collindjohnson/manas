@@ -77,7 +77,13 @@ export function renderManagedDocument(sourceContent: string, existing?: string):
 }
 
 function sameSource(left: SourceRecord | undefined, right: SourceRecord): boolean {
-	return JSON.stringify(left) === JSON.stringify(right);
+	const canonical = (value: unknown): string => {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).filter((key) => (value as Record<string, unknown>)[key] !== undefined).sort().map((key) => JSON.stringify(key) + ":" + canonical((value as Record<string, unknown>)[key])).join(",") + "}";
+  return JSON.stringify(value);
+ };
+ const comparison = (value: SourceRecord | undefined) => value && ({ ...value, provenance: value.provenance && { ...value.provenance, retrievedAt: undefined } });
+ return canonical(comparison(left)) === canonical(comparison(right));
 }
 
 export async function syncSource(adapter: SourceAdapter, repository: Repository, checkpoints?: SourceCheckpointStore, quarantine?: SourceQuarantineSink, lifecycle?: IngestionRunLifecycle): Promise<{ created: number; updated: number; stale: number; quarantined: number }> {

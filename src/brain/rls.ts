@@ -1,4 +1,15 @@
 export const RLS_TENANT_TABLES = [
+	"brain_capture_turns",
+ "brain_owner_sessions",
+ "brain_maintenance_analysis",
+ "brain_catalog_executions",
+ "brain_catalog_execution_steps",
+ "brain_google_sources",
+ "brain_google_batches",
+ "brain_google_seen",
+ "brain_google_attempts",
+ "brain_answer_receipts",
+ "brain_answer_feedback",
 	"brain_documents",
 	"brain_projection_runs",
 	"brain_jobs",
@@ -45,6 +56,17 @@ export const RLS_TENANT_TABLES = [
 ] as const;
 
 const RLS_BRAIN_SCOPED_TABLES = new Set<string>([
+	"brain_capture_turns",
+ "brain_owner_sessions",
+ "brain_maintenance_analysis",
+ "brain_catalog_executions",
+ "brain_catalog_execution_steps",
+ "brain_google_sources",
+ "brain_google_batches",
+ "brain_google_seen",
+ "brain_google_attempts",
+ "brain_answer_receipts",
+ "brain_answer_feedback",
 	"brain_documents",
 	"brain_projection_runs",
 	"brain_model_descriptors",

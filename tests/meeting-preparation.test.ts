@@ -1,0 +1,45 @@
+import { test, expect } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { BrainRepository } from "../src/brain/repository";
+import { openPgliteBrainStore } from "../src/brain/store";
+import { indexBrainRepository, searchVerifiedHybridBrainRepository } from "../src/brain/pglite-indexer";
+import { remember, forget } from "../src/brain/memory";
+import { putOpenLoop, setOpenLoopStatus } from "../src/brain/open-loops";
+import { prepareMeeting, getMeetingPreparation } from "../src/brain/meeting-preparation";
+const owner = { scope: "admin" as const, principal: "owner" };
+test("meeting preparation retrieves cited interactions and commitments and suppresses stale briefs", async () => {
+ const root = await mkdtemp(join(tmpdir(), "manas-meeting-")), repository = new BrainRepository(join(root, "brain")), store = await openPgliteBrainStore();
+ try {
+  await repository.initialize();
+  for (const [key, value] of [["user.name", "Test"], ["user.email", "test@example.invalid"]]) await promisify(execFile)("git", ["-C", repository.root, "config", key!, value!]);
+  const memory = await remember(repository, owner, { text: "Maya will send the Juniper proposal.", idempotencyKey: "fact", provenance: { sourceType: "user" }, visibility: ["private"] });
+  await indexBrainRepository(store, repository);
+  const evidence = (await searchVerifiedHybridBrainRepository(store, repository, "Juniper")).map((hit) => hit.citation);
+  const loop = await putOpenLoop(repository, owner, { title: "Send Juniper proposal", participants: ["Maya"], evidence, idempotencyKey: "loop" });
+  const input = { title: "Juniper", participants: ["Maya"], idempotencyKey: "meeting" };
+  const first = await prepareMeeting(repository, store, owner, input, { mode: "keyword" });
+  expect(first).toMatchObject({ freshness: "current", outcome: "prepared", openLoops: [{ id: loop.id, title: "Send Juniper proposal" }], recentInteractions: [{ documentId: memory.id }] });
+  expect(JSON.stringify(first)).toContain("sourceUpdatedAt");
+  const id = first.id;
+  expect(await prepareMeeting(repository, store, owner, input)).toMatchObject({ id, replayed: true });
+  await expect(prepareMeeting(repository, store, owner, { ...input, title: "Changed" })).rejects.toMatchObject({ code: "idempotency_conflict" });
+  await expect(getMeetingPreparation(repository, { scope: "read", principal: "other", allowedAccessLabels: ["private"] }, id)).rejects.toMatchObject({ code: "meeting_unavailable" });
+  await expect(getMeetingPreparation(repository, { ...owner, allowedAccessLabels: [] }, id)).rejects.toMatchObject({ code: "meeting_unavailable" });
+  await setOpenLoopStatus(repository, owner, { id: loop.id, expectedRevision: loop.revision, status: "done", idempotencyKey: "done" });
+  const stale = await getMeetingPreparation(repository, owner, id);
+  expect(stale.freshness).toBe("stale");
+  expect(JSON.stringify(stale)).not.toContain("Juniper");
+  const second = await prepareMeeting(repository, store, owner, { ...input, idempotencyKey: "meeting-2" });
+  expect(second).toMatchObject({ freshness: "current", openLoops: [] });
+  await forget(repository, owner, { id: memory.id, expectedRevision: memory.revision, idempotencyKey: "withdraw" });
+  await indexBrainRepository(store, repository);
+  expect(await getMeetingPreparation(repository, owner, second.id)).toMatchObject({ freshness: "stale" });
+  expect(await searchVerifiedHybridBrainRepository(store, repository, "Juniper")).toEqual([]);
+  const missing = await prepareMeeting(repository, store, owner, { title: "Juniper", idempotencyKey: "no-evidence" });
+  expect(missing).toMatchObject({ outcome: "insufficient_evidence", evidence: [] });
+ } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+}, 20000);

@@ -150,6 +150,8 @@ export async function runSync(
 	config: Config = defaultConfig(),
 	options: SyncOptions = {},
 ): Promise<SyncResult> {
+	const canonical = await runCanonicalSync(config, options);
+	if (canonical) return canonical;
 	const execute = async (): Promise<SyncResult> => {
 		if (!options.dryRun) await ensureArchiveRoot(config.archiveRoot);
 		const state = options.dryRun
@@ -269,4 +271,36 @@ export async function runSync(
 	return options.dryRun
 		? execute()
 		: withStateLock(config.stateRoot, execute);
+}
+
+async function runCanonicalSync(config: Config, options: SyncOptions): Promise<SyncResult | undefined> {
+ const { withCanonicalOperations } = await import("./canonical-services");
+ return withCanonicalOperations(config, async (execute) => {
+  const discovered = await discover(options);
+  const warnings = [...discovered.warnings], failures = [...discovered.failures];
+  const conversations = deduplicateConversations(discovered.conversations, warnings);
+  const providers = new Map<string, SyncTotals>();
+  for (const result of discovered.results) providers.set(result.provider, { ...zeroTotals(), scanned: result.scanned });
+  const changes: SyncResult["changes"] = [];
+  for (const conversation of conversations) {
+   const totals = providers.get(conversation.provider) ?? zeroTotals();
+   if (options.conversations) totals.scanned += 1;
+   totals.redacted += conversation.redactions;
+   providers.set(conversation.provider, totals);
+   try {
+    const result = await execute("sources.conversation.ingest", { conversation, dryRun: options.dryRun ?? false }) as import("./brain/conversation-ingestion").ConversationIngestionResult;
+    const kind = result.replayed ? "skip" : result.action;
+    totals[kind === "create" ? "created" : kind === "update" ? "updated" : "skipped"] += 1;
+    changes.push({ kind, provider: conversation.provider, sourceId: conversation.sourceId, id: result.documentId, relativePath: result.path });
+    if (result.preservedLegacyContent) warnings.push({ provider: conversation.provider, sourcePath: conversation.sourcePath, message: "Preserved the complete pre-migration transcript and user edits below the current managed transcript." });
+   } catch (error) {
+    totals.failures += 1;
+    failures.push({ provider: conversation.provider, sourcePath: conversation.sourcePath, message: error instanceof Error ? error.message : "canonical conversation ingestion failed" });
+   }
+  }
+  const totals = zeroTotals();
+  for (const value of providers.values()) addTotals(totals, value);
+  totals.warnings = warnings.length; totals.failures = failures.length;
+  return { dryRun: options.dryRun ?? false, changes, report: { totals, providers: Object.fromEntries(providers), warnings, failures } };
+ });
 }

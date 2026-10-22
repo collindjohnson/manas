@@ -31,10 +31,12 @@ describe("advanced local analysis", () => {
 		expect(diagnoseRetrieval({ query: "q", tenantId: "tenant", brainId: "brain", candidates: [{ tenantId: "tenant", brainId: "brain", verified: false }, { tenantId: "other", brainId: "brain", verified: true }] })).toMatchObject({ candidateCount: 1, verifiedCount: 0 });
 	});
 
-	test("replays the isolated evaluation corpus and keeps maintenance proposals unapplied", () => {
-		const report = evaluationModule.runAdvancedEvaluation();
-		expect(report).toMatchObject({ corpus: "gbrain-v0.42.65.0-synthetic", cases: 4, isolated: true });
-		expect(report.replay.recall).toBeGreaterThan(0);
+	test("replays the isolated evaluation corpus and keeps maintenance proposals unapplied", async () => {
+		const report = await evaluationModule.runAdvancedEvaluation();
+		expect(report).toMatchObject({ corpus: "manas-retrieval-v1", cases: 6, isolated: true });
+		expect(report.metrics).toEqual({ recallAt10: 1, mrr: 1, ndcgAt10: 1 });
+		expect(report.results.filter((result) => result.expectedIds.length === 0).every((result) => result.actualIds.length === 0)).toBe(true);
+		expect(report.corpusHash).toMatch(/^[a-f0-9]{64}$/);
 		expect(evaluationModule.discoverAdvancedFeatures().map((feature) => feature.id)).toContain("longmemeval-replay");
 		expect(evaluationModule.proposeSelfMaintenance({ tenantId: "tenant", brainId: "brain", findings: ["orphan chunks"], dryRun: true })).toMatchObject({ dryRun: true, proposals: [{ requiresApproval: true }] });
 	});

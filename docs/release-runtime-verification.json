@@ -1,0 +1,18 @@
+{
+  "createdAt": "2026-10-22T02:29:24.746Z",
+  "isolated": true,
+  "requiredTarget": null,
+  "checks": [
+    {
+      "target": "darwin-arm64",
+      "version": "0.1.1",
+      "remembered": true,
+      "recalledAfterProcessRestart": 1
+    },
+    {
+      "target": "darwin-x64",
+      "execution": "unavailable",
+      "reason": "EBADARCH: this host cannot execute the darwin-x64 binary"
+    }
+  ]
+}

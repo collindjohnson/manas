@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-22T01:22:57.909Z",
+  "agent": "claude-code",
+  "isolated": true,
+  "phase": "authentication",
+  "passed": false,
+  "error": {
+    "code": "authentication_expired",
+    "suggestedFix": "Run claude auth login, then rerun the native verification."
+  },
+  "nativeInferenceTokens": 0,
+  "nativeCostUsd": 0,
+  "limitations": "Authentication prevented the native session smoke test; no context delivery or capture success is claimed."
+}

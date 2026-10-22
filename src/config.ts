@@ -87,6 +87,7 @@ export interface Config {
 	brain?: BrainConfig;
 	providers?: ProviderConfig;
 	auth?: AuthConfig;
+ automation?: { managedWrites?: boolean };
 }
 
 function boundedInteger(
@@ -325,12 +326,18 @@ function rejectUnknownKeys(value: unknown, allowed: readonly string[], field: st
 function assertConfigShape(value: unknown, field = "configuration"): void {
 	if (value === undefined) return;
 	if (!isRecord(value)) throw new Error(`${field} must contain an object`);
-	rejectUnknownKeys(value, ["configVersion", "archiveRoot", "stateRoot", "launchAgentPath", "brain", "providers", "auth"], field);
+	rejectUnknownKeys(value, ["configVersion", "archiveRoot", "stateRoot", "launchAgentPath", "brain", "providers", "auth", "automation"], field);
 	if (
 		"configVersion" in value &&
 		(value.configVersion !== 1 || !Number.isInteger(value.configVersion))
 	)
 		throw new Error(`unsupported configuration version: ${String(value.configVersion)}`);
+ const automation = value.automation;
+ if (automation !== undefined) {
+  if (!isRecord(automation)) throw new Error("automation configuration must contain an object");
+  rejectUnknownKeys(automation, ["managedWrites"], field + ".automation");
+  if (automation.managedWrites !== undefined && typeof automation.managedWrites !== "boolean") throw new Error("automation.managedWrites must be a boolean");
+ }
 	const brain = value.brain;
 	if (brain !== undefined && !isRecord(brain)) throw new Error(`${field}.brain must contain an object`);
 	if (brain !== undefined) rejectUnknownKeys(brain, ["databasePath", "zeroEntropyBaseUrl", "zeroEntropyCollection", "zeroEntropyBatchSize", "chunkTargetChars", "chunkMaxChars", "retrievalLimit", "synthesisEvidenceLimit", "requestTimeoutMs", "retryAttempts", "retryBackoffMs", "remoteOversample", "remotePollIntervalMs", "remotePollDurationMs", "snippetChars", "questionMaxChars", "synthesisEvidenceChars", "diagnostics", "codexTimeoutMs", "synthesisCommand", "rerankerEndpoint", "rerankerModel", "generationEndpoint", "generationModel", "keychainService", "keychainAccount"], `${field}.brain`);
@@ -413,6 +420,7 @@ export type ConfigOverride = {
 	brain?: Partial<BrainConfig>;
 	providers?: Partial<ProviderConfig>;
 	auth?: AuthConfig;
+ automation?: { managedWrites?: boolean };
 };
 
 export function defaultConfigFilePath(home = homedir()): string {

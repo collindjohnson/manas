@@ -1,3 +1,5 @@
+import { isPrimaryEvidence } from "./evidence-contract";
+import { memoryIsActive, memoryState, MEMORY_SOURCE } from "./memory";
 import * as hybridModule from "./hybrid";
 import { createHash, randomUUID } from "node:crypto";
 import { autocutHybridResults, reciprocalRankFusion, rerankCandidates, type HybridResult, type RankedCandidate } from "./hybrid";
@@ -14,6 +16,68 @@ type SchemaPackSelection = { id: string; version: string };
 type ManifestEntry = { id: string; path: string; contentHash: string; revision: string; deleted?: boolean; stale?: boolean; source?: { type: string; externalId: string; provenance?: { sourceType: string; sourcePath?: string; retrievedAt: string; metadata?: Record<string, string> }; externalRevision?: string; contentHash?: string; extractionMetadata?: Record<string, string>; updatedAt?: string; visibilityLabels?: string[]; managedSections?: string[] }; accessLabels?: string[] };
 type Snapshot = { brainId: string; repositoryId: string; commit: string; tenantId?: string; pages: ManifestEntry[]; settings?: { schemaPack?: SchemaPackSelection } };
 type Repository = { snapshot(ref?: string): Promise<Snapshot>; readPage(snapshot: Snapshot, id: string): Promise<{ content: string }> };
+
+const projectionRefreshes = new WeakMap<Store, Map<string, Promise<void>>>();
+
+// A service worker and catalog request can project through different entry points.
+// Serialize the entire build, including its snapshot and run reservation, per store.
+const projectionWrites = new WeakMap<Store, Promise<void>>();
+async function withProjectionWrite<T>(store: Store, action: () => Promise<T>): Promise<T> {
+ const previous = projectionWrites.get(store) ?? Promise.resolve();
+ let release!: () => void;
+ const gate = new Promise<void>((resolve) => { release = resolve; });
+ const pending = previous.then(() => gate);
+ projectionWrites.set(store, pending);
+ await previous;
+ try { return await action(); }
+ finally { release(); if (projectionWrites.get(store) === pending) projectionWrites.delete(store); }
+}
+
+// Concurrent catalog readers share one catch-up from canonical Git.
+export async function ensureCurrentBrainProjection(store: Store, repository: Repository): Promise<void> {
+ const snapshot = await repository.snapshot();
+ const key = JSON.stringify([snapshot.tenantId ?? "local", snapshot.brainId]);
+ let refreshes = projectionRefreshes.get(store);
+ if (!refreshes) { refreshes = new Map(); projectionRefreshes.set(store, refreshes); }
+ const pending = refreshes.get(key);
+ if (pending) { await pending; return ensureCurrentBrainProjection(store, repository); }
+ const work = async () => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+   const current = await repository.snapshot();
+   const active = await store.query<{ git_commit: string }>("SELECT git_commit FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2", [current.tenantId ?? "local", current.brainId]);
+   if (active[0]?.git_commit === current.commit) return;
+   await indexBrainRepositoryIncremental(store, repository);
+  }
+  const current = await repository.snapshot();
+  const active = await store.query<{ git_commit: string }>("SELECT git_commit FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2", [current.tenantId ?? "local", current.brainId]);
+  if (active[0]?.git_commit !== current.commit) throw new Error("Canonical brain changed during projection refresh; retry the request.");
+ };
+ const task = work();
+ refreshes.set(key, task);
+ try { await task; } finally { if (refreshes.get(key) === task) refreshes.delete(key); }
+}
+
+function projectionSnapshot<T extends Snapshot>(snapshot: T): T {
+ return { ...snapshot, pages: snapshot.pages.map((page) => {
+  if (!isPrimaryEvidence(page)) return { ...page, deleted: true };
+  if (page.source?.type !== MEMORY_SOURCE) return page;
+  let active = false;
+  try { active = memoryState(page)?.status === "active"; } catch {}
+  return active ? page : { ...page, deleted: true };
+ }) };
+}
+
+async function suppressMemoryDerivations(store: Store, snapshot: Snapshot): Promise<void> {
+ for (const page of snapshot.pages.filter((entry) => entry.source?.type === MEMORY_SOURCE)) {
+  const state = page.source?.provenance?.metadata?.["memory.state"] ?? null;
+  const prior = await store.query<{ state: string | null }>("SELECT source_metadata->'source'->'provenance'->'metadata'->>'memory.state' AS state FROM brain_documents WHERE id = $1 AND tenant_id = $2 AND brain_id = $3", [page.id, snapshot.tenantId ?? "local", snapshot.brainId]);
+  if (!page.deleted && memoryIsActive(page) && prior[0]?.state === state) continue;
+  const parameters = [snapshot.tenantId ?? "local", snapshot.brainId, page.id];
+  await store.query("DELETE FROM brain_claims WHERE tenant_id = $1 AND brain_id = $2 AND (document_id = $3 OR fact_id IN (SELECT id FROM brain_facts WHERE tenant_id = $1 AND brain_id = $2 AND document_id = $3))", parameters);
+  await store.query("DELETE FROM brain_facts WHERE tenant_id = $1 AND brain_id = $2 AND document_id = $3", parameters);
+  await store.query("DELETE FROM brain_graph_edges WHERE tenant_id = $1 AND brain_id = $2 AND metadata->>'documentId' = $3", parameters);
+ }
+}
 
 function digest(content: string): string { return createHash("sha256").update(content).digest("hex"); }
 function schemaPack(snapshot: Snapshot): SchemaPackSelection {
@@ -59,6 +123,7 @@ export interface ProjectedChunk {
 }
 
 export interface Citation {
+	authorizationScope?: { tenantId: string; brainId: string; allowedAccessLabels: string[] | null };
 	tenantId: string;
 	brainId: string;
 	documentId: string;
@@ -141,7 +206,11 @@ export function chunkMarkdown(documentId: string, content: string, maximumChars 
 }
 
 export async function indexBrainRepository(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number }> {
-	const snapshot = await repository.snapshot();
+ return withProjectionWrite(store, () => indexBrainRepositoryUnlocked(store, repository));
+}
+
+async function indexBrainRepositoryUnlocked(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number }> {
+	const snapshot = projectionSnapshot(await repository.snapshot());
 	const tenantId = snapshot.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(snapshot);
 	const runId = randomUUID();
@@ -149,6 +218,7 @@ export async function indexBrainRepository(store: Store, repository: Repository)
 	let indexed = 0;
 	let skippedDeleted = 0;
 	await store.transaction(async (transaction) => {
+		await suppressMemoryDerivations(transaction, snapshot);
 		const run = await transaction.query<{ id: string }>("INSERT INTO brain_projection_runs (id, tenant_id, brain_id, repository_id, git_commit, status) VALUES ($1, $2, $3, $4, $5, 'running') ON CONFLICT (brain_id, git_commit) DO UPDATE SET status = 'running', started_at = now(), completed_at = NULL RETURNING id", [runId, tenantId, snapshot.brainId, snapshot.repositoryId, snapshot.commit]);
 		activeRunId = run[0]?.id ?? runId;
 		for (const page of snapshot.pages) {
@@ -192,7 +262,11 @@ export async function indexBrainRepository(store: Store, repository: Repository)
 }
 
 export async function indexBrainRepositoryIsolated(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string }> {
-	const snapshot = await repository.snapshot();
+ return withProjectionWrite(store, () => indexBrainRepositoryIsolatedUnlocked(store, repository));
+}
+
+async function indexBrainRepositoryIsolatedUnlocked(store: Store, repository: Repository): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string }> {
+	const snapshot = projectionSnapshot(await repository.snapshot());
 	const tenantId = snapshot.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(snapshot);
 	const runId = randomUUID();
@@ -213,6 +287,7 @@ export async function indexBrainRepositoryIsolated(store: Store, repository: Rep
 			}
 		});
 		await store.transaction(async (transaction) => {
+			await suppressMemoryDerivations(transaction, snapshot);
 			await transaction.query("UPDATE brain_projection_runs SET status = 'complete', completed_at = now() WHERE id = $1 AND status = 'running'", [runId]);
 			await transaction.query("INSERT INTO brain_repository_snapshots (id, tenant_id, brain_id, repository_id, git_commit, manifest_hash) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (tenant_id, brain_id, git_commit) DO UPDATE SET manifest_hash = EXCLUDED.manifest_hash", [runId, tenantId, snapshot.brainId, snapshot.repositoryId, snapshot.commit, digest(JSON.stringify(snapshot.pages))]);
 			await transaction.query("DELETE FROM brain_cache_entries WHERE tenant_id = $1 AND brain_id = $2 AND projected_commit <> $3", [tenantId, snapshot.brainId, snapshot.commit]);
@@ -236,17 +311,21 @@ export async function indexBrainRepositoryIsolated(store: Store, repository: Rep
 }
 
 export async function indexBrainRepositoryIncremental(store: Store, repository: Repository, options: { fromCommit?: string } = {}): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string; delta?: ProjectionDelta }> {
-	const target = await repository.snapshot();
+ return withProjectionWrite(store, () => indexBrainRepositoryIncrementalUnlocked(store, repository, options));
+}
+
+async function indexBrainRepositoryIncrementalUnlocked(store: Store, repository: Repository, options: { fromCommit?: string } = {}): Promise<{ commit: string; indexed: number; skippedDeleted: number; projectionRunId: string; delta?: ProjectionDelta }> {
+	const target = projectionSnapshot(await repository.snapshot());
 	const tenantId = target.tenantId ?? "local";
 	const selectedSchemaPack = schemaPack(target);
 	const active = await store.query<{ git_commit: string; run_id: string }>("SELECT git_commit, run_id FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2", [tenantId, target.brainId]);
 	const fromCommit = options.fromCommit ?? active[0]?.git_commit;
 	if (!fromCommit) {
-		const result = await indexBrainRepositoryIsolated(store, repository);
+		const result = await indexBrainRepositoryIsolatedUnlocked(store, repository);
 		return result;
 	}
 	if (active[0]?.git_commit !== fromCommit) throw new Error("incremental projection base is stale");
-	const previous = await repository.snapshot(fromCommit);
+	const previous = projectionSnapshot(await repository.snapshot(fromCommit));
 	const delta = computeProjectionDelta(previous.pages, target.pages);
 	if (target.commit === fromCommit) return { commit: target.commit, indexed: 0, skippedDeleted: target.pages.filter((page) => page.deleted).length, delta, projectionRunId: active[0]!.run_id };
 	const changed = new Set([...delta.created, ...delta.updated, ...delta.moved.map((entry) => entry.id), ...delta.deleted, ...delta.restored]);
@@ -279,6 +358,7 @@ export async function indexBrainRepositoryIncremental(store: Store, repository: 
 			}
 		});
 		await store.transaction(async (transaction) => {
+			await suppressMemoryDerivations(transaction, target);
 			await transaction.query("UPDATE brain_projection_runs SET status = 'complete', completed_at = now() WHERE id = $1 AND status = 'running'", [runId]);
 			await transaction.query("INSERT INTO brain_repository_snapshots (id, tenant_id, brain_id, repository_id, git_commit, manifest_hash) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (tenant_id, brain_id, git_commit) DO UPDATE SET manifest_hash = EXCLUDED.manifest_hash", [runId, tenantId, target.brainId, target.repositoryId, target.commit, digest(JSON.stringify(target.pages))]);
 			await transaction.query("DELETE FROM brain_cache_entries WHERE tenant_id = $1 AND brain_id = $2 AND projected_commit <> $3", [tenantId, target.brainId, target.commit]);
@@ -313,13 +393,20 @@ export async function indexBrainRepositoryIncremental(store: Store, repository: 
 	}
 }
 
-export async function relatedBrainPages(store: Store, path: string, brainId: string, tenantId = "local", allowedAccessLabels?: string[]): Promise<Array<{ id: string; path: string; relation: "outbound" | "backlink" }>> {
+export async function relatedBrainPages(store: Store, path: string, brainId: string, tenantId = "local", allowedAccessLabels?: string[], repository?: Repository): Promise<Array<{ id: string; path: string; relation: "outbound" | "backlink" }>> {
 	if (!path || !brainId || !tenantId) throw new Error("invalid related-page scope");
+	const current = repository ? await repository.snapshot() : undefined;
+	const visible = (entry: ManifestEntry) => !entry.deleted && !entry.stale && isPrimaryEvidence(entry) && memoryIsActive(entry) && (allowedAccessLabels === undefined || (entry.accessLabels ?? []).every((label) => allowedAccessLabels.includes(label)));
+	if (current && (current.brainId !== brainId || (current.tenantId ?? "local") !== tenantId || !current.pages.some((entry) => entry.path === path && visible(entry)))) return [];
+
 	const labels = allowedAccessLabels === undefined ? null : JSON.stringify([...new Set(allowedAccessLabels)].sort());
-	return store.query("SELECT d.id, d.path, 'outbound' AS relation FROM brain_links l JOIN brain_documents source ON source.id = l.source_document_id JOIN brain_documents d ON d.path = l.target_path AND d.tenant_id = l.tenant_id AND d.brain_id = l.brain_id WHERE l.tenant_id = $1 AND l.brain_id = $2 AND source.path = $3 AND source.deleted_at IS NULL AND d.deleted_at IS NULL AND ($4::jsonb IS NULL OR d.access_labels <@ $4::jsonb) UNION ALL SELECT source.id, source.path, 'backlink' AS relation FROM brain_links l JOIN brain_documents source ON source.id = l.source_document_id WHERE l.tenant_id = $1 AND l.brain_id = $2 AND l.target_path = $3 AND source.deleted_at IS NULL AND ($4::jsonb IS NULL OR source.access_labels <@ $4::jsonb) ORDER BY relation, path", [tenantId, brainId, path, labels]);
+	const roots = await store.query("SELECT id FROM brain_documents WHERE tenant_id = $1 AND brain_id = $2 AND path = $3 AND deleted_at IS NULL AND ($4::jsonb IS NULL OR access_labels <@ $4::jsonb)", [tenantId, brainId, path, labels]);
+	if (!roots.length) return [];
+	const results = await store.query<{ id: string; path: string; relation: "outbound" | "backlink" }>("SELECT d.id, d.path, 'outbound' AS relation FROM brain_links l JOIN brain_documents source ON source.id = l.source_document_id JOIN brain_documents d ON d.path = l.target_path AND d.tenant_id = l.tenant_id AND d.brain_id = l.brain_id WHERE l.tenant_id = $1 AND l.brain_id = $2 AND source.path = $3 AND source.deleted_at IS NULL AND d.deleted_at IS NULL AND ($4::jsonb IS NULL OR d.access_labels <@ $4::jsonb) UNION ALL SELECT source.id, source.path, 'backlink' AS relation FROM brain_links l JOIN brain_documents source ON source.id = l.source_document_id WHERE l.tenant_id = $1 AND l.brain_id = $2 AND l.target_path = $3 AND source.deleted_at IS NULL AND ($4::jsonb IS NULL OR source.access_labels <@ $4::jsonb) ORDER BY relation, path", [tenantId, brainId, path, labels]);
+	return current ? results.filter((result) => current.pages.some((entry) => entry.id === result.id && visible(entry))) : results;
 }
 
-export async function traverseBrainGraph(store: Store, path: string, brainId: string, maximumDepth = 2, maximumNodes = 100, tenantId = "local", allowedAccessLabels?: string[]): Promise<Array<{ id: string; path: string; depth: number; relation: "outbound" | "backlink"; via: string }>> {
+export async function traverseBrainGraph(store: Store, path: string, brainId: string, maximumDepth = 2, maximumNodes = 100, tenantId = "local", allowedAccessLabels?: string[], repository?: Repository): Promise<Array<{ id: string; path: string; depth: number; relation: "outbound" | "backlink"; via: string }>> {
 	if (!path || !brainId || !tenantId || !Number.isInteger(maximumDepth) || maximumDepth < 1 || maximumDepth > 5 || !Number.isInteger(maximumNodes) || maximumNodes < 1 || maximumNodes > 500) throw new Error("invalid graph traversal scope");
 	const visited = new Set<string>([path]);
 	const found: Array<{ id: string; path: string; depth: number; relation: "outbound" | "backlink"; via: string }> = [];
@@ -327,7 +414,7 @@ export async function traverseBrainGraph(store: Store, path: string, brainId: st
 	for (let depth = 1; depth <= maximumDepth && frontier.length && found.length < maximumNodes; depth++) {
 		const next: string[] = [];
 		for (const current of frontier.sort()) {
-			const related = await relatedBrainPages(store, current, brainId, tenantId, allowedAccessLabels);
+			const related = await relatedBrainPages(store, current, brainId, tenantId, allowedAccessLabels, repository);
 			for (const page of related) {
 				if (visited.has(page.path)) continue;
 				visited.add(page.path);
@@ -345,6 +432,8 @@ export async function traverseBrainGraph(store: Store, path: string, brainId: st
 export type ProjectedSearchResult = { id: string; path: string; text: string; rank: number; citation: Citation };
 
 export interface HybridProjectionSearchOptions {
+ expand?: boolean;
+	mode?: "keyword" | "hybrid" | "semantic";
 	limit?: number;
 	brainId?: string;
 	tenantId?: string;
@@ -429,9 +518,9 @@ export async function searchHybridBrainRepository(store: Store, query: string, o
 	if (!query.trim() || !Number.isInteger(limit) || limit < 1 || limit > 100 || !tenantId.trim()) throw new Error("invalid hybrid search options");
 	const brainId = options.brainId;
 	const candidateLimit = Math.min(100, Math.max(limit * 4, 20));
-	const lexical = await searchBrainRepository(store, query, candidateLimit, brainId, options.allowedAccessLabels, tenantId);
+	const lexical = options.mode === "semantic" ? [] : options.expand ? (await searchExpandedBrainRepository(store, query, candidateLimit, brainId, options.allowedAccessLabels, tenantId)).results : await searchBrainRepository(store, query, candidateLimit, brainId, options.allowedAccessLabels, tenantId);
 	const semantic: ProjectedSearchResult[] = [];
-	if (options.embeddingProvider) {
+	if (options.embeddingProvider && options.mode !== "keyword") {
 		const vectors = await semanticSearch(store, options.embeddingProvider, query, candidateLimit, { tenantId, brainId: brainId ?? "local", allowedAccessLabels: options.allowedAccessLabels });
 		for (const vector of vectors) {
 			const result = await projectedChunkById(store, vector.id, tenantId, brainId);
@@ -485,15 +574,17 @@ export async function searchHybridBrainRepository(store: Store, query: string, o
 }
 
 export async function searchVerifiedHybridBrainRepository(store: Store, repository: Repository, query: string, options: HybridProjectionSearchOptions = {}): Promise<Array<HybridProjectedSearchResult & { verifiedText: string }>> {
-	const results = await searchHybridBrainRepository(store, query, options);
-	return Promise.all(results.map(async (result) => ({ ...result, verifiedText: (await resolveBrainCitation(store, repository, result.citation)).text })));
+	const current = await repository.snapshot();
+	const results = (await searchHybridBrainRepository(store, query, options)).filter((result) => currentCitationVisible(current, result.citation, options.allowedAccessLabels));
+	return Promise.all(results.map(async (result) => ({ ...result, citation: { ...result.citation, authorizationScope: { tenantId: result.citation.tenantId, brainId: result.citation.brainId, allowedAccessLabels: options.allowedAccessLabels ?? null } }, verifiedText: (await resolveBrainCitation(store, repository, result.citation)).text })));
 }
 
 export async function searchVerifiedBrainRepository(store: Store, repository: Repository, query: string, limit = 20, brainId?: string, allowedAccessLabels?: string[], tenantId = "local"): Promise<Array<ProjectedSearchResult & { verifiedText: string }>> {
-	const results = await searchBrainRepository(store, query, limit, brainId, allowedAccessLabels, tenantId);
+	const current = await repository.snapshot();
+	const results = (await searchBrainRepository(store, query, limit, brainId, allowedAccessLabels, tenantId)).filter((result) => currentCitationVisible(current, result.citation, allowedAccessLabels));
 	const verified = await Promise.all(results.map(async (result) => {
 		const resolved = await resolveBrainCitation(store, repository, result.citation);
-		return { ...result, verifiedText: resolved.text };
+		return { ...result, citation: { ...result.citation, authorizationScope: { tenantId: result.citation.tenantId, brainId: result.citation.brainId, allowedAccessLabels: allowedAccessLabels ?? null } }, verifiedText: resolved.text };
 	}));
 	return verified;
 }
@@ -502,7 +593,14 @@ export async function rerankProjectedSearchResults(provider: { rerank(query: str
 	return hybridModule.rerankCandidates(provider, query, results.map((result) => ({ ...result, documentId: result.citation.documentId })));
 }
 
+function currentCitationVisible(snapshot: Snapshot, citation: Citation, allowedAccessLabels?: string[]): boolean {
+	const entry = snapshot.pages.find((page) => page.id === citation.documentId);
+	return snapshot.brainId === citation.brainId && Boolean(entry && !entry.deleted && !entry.stale && isPrimaryEvidence(entry) && memoryIsActive(entry) && entry.revision === citation.revision && entry.path === citation.path && (allowedAccessLabels === undefined || (entry.accessLabels ?? []).every((label) => allowedAccessLabels.includes(label))));
+}
+
 export async function resolveBrainCitation(store: Store, repository: Repository, citation: Citation): Promise<{ text: string; citation: Citation }> {
+	if (citation.authorizationScope && (citation.authorizationScope.tenantId !== citation.tenantId || citation.authorizationScope.brainId !== citation.brainId)) throw new Error("citation authorization scope is invalid");
+	if (!currentCitationVisible(await repository.snapshot(), citation, citation.authorizationScope?.allowedAccessLabels ?? undefined)) throw new Error("citation is no longer current in Git");
 	const chunkId = citation.chunkId;
 	const active = await store.query<{ git_commit: string }>(
 		"SELECT git_commit FROM brain_active_projection_runs WHERE tenant_id = $1 AND brain_id = $2",

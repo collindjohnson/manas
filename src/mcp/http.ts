@@ -1,3 +1,4 @@
+import { searchWithRegistry } from "../canonical-services";
 import * as serverModule from "./server";
 import { BrainRepository } from "../brain/repository";
 import * as operationsModule from "../brain/operations";
@@ -6,7 +7,7 @@ import * as protocolModule from "./protocol";
 import * as errorsModule from "./errors";
 import { createHash } from "node:crypto";
 import type { Config } from "../config";
-import type { OperationAuthorization, OperationContext, OperationDefinition, OperationRegistry } from "../brain/operation-registry";
+import { createBrainRepositoryOperationRegistry, type OperationAuthorization, type OperationContext, type OperationDefinition, type OperationRegistry } from "../brain/operation-registry";
 
 type Request = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: unknown };
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -122,12 +123,12 @@ function localBrainRepository() {
 	return new BrainRepository(root);
 }
 
-export async function handleMcpHttpRequest(config: Config | Record<string, never>, request: Request, operationRegistry?: OperationRegistry, operationContext?: Partial<OperationContext>): Promise<unknown> {
+export async function handleMcpHttpRequest(config: Config | Record<string, never>, request: Request, operationRegistry?: OperationRegistry, operationContext?: Partial<OperationContext>, transport: { catalogOnly?: boolean } = {}): Promise<unknown> {
 	if (request.method === "ping") return {};
 	if (request.method === "notifications/initialized" || request.method === "notifications/cancelled") return {};
 	if (request.method === "initialize") return { protocolVersion: requestedProtocolVersion(request), capabilities: { tools: {} }, serverInfo: { name: "manas", version: MANAS_VERSION } };
 	if (request.method === "tools/list") {
-		const legacy = serverModule.registeredTools.filter((tool: { name: string }) => httpOperationNames.has(tool.name)).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({ ...tool, _meta: { requiredScope: requiredMcpScope(tool.name, operationRegistry) } }));
+		const legacy = (transport.catalogOnly ? [] : serverModule.registeredTools).filter((tool: { name: string }) => httpOperationNames.has(tool.name)).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({ ...tool, _meta: { requiredScope: requiredMcpScope(tool.name, operationRegistry) } }));
 		const generated = operationRegistry?.list().filter((definition) => definition.trustBoundary !== "local-only").map((definition) => ({ name: definition.name, description: definition.description, inputSchema: definition.inputSchema, _meta: { requiredScope: definition.requiredScope } })) ?? [];
 		const byName = new Map([...legacy, ...generated].map((tool) => [tool.name, tool]));
 		return { tools: [...byName.values()].sort((left, right) => left.name.localeCompare(right.name)) };
@@ -146,24 +147,29 @@ export async function handleMcpHttpRequest(config: Config | Record<string, never
 			if (error instanceof Error && error.message !== "operation is not registered") throw error;
 		}
 	}
+	if (transport.catalogOnly) throw Object.assign(new Error("operation is not registered"), { code: "operation_unavailable", retryable: false, suggestedFix: "Use an operation advertised by this endpoint." });
 	if (operationsModule.isBrainRepositoryOperation(name)) {
 		const requiredScope = requiredMcpScope(name, operationRegistry);
 		if (operationContext?.scope) {
 			const rank: Record<McpScope, number> = { read: 1, write: 2, admin: 3 };
 			if (rank[operationContext.scope] < rank[requiredScope]) throw new Error("operation scope is insufficient");
 		}
-		await operationContext?.authorize?.({ name, description: `Execute the ${name} contract.`, inputSchema: {}, outputSchema: {}, requiredScope, trustBoundary: "remote-safe", execute: async () => undefined }, args);
-		const result = await operationsModule.executeBrainRepositoryOperation(localBrainRepository(), name, args);
+		const registry = createBrainRepositoryOperationRegistry(localBrainRepository());
+		const result = await registry.execute({ scope: operationContext?.scope ?? requiredScope, principal: "http", ...operationContext }, name, args);
 		return { content: [{ type: "text", text: JSON.stringify(result) }] };
+	}
+	if (!operationRegistry && (operationContext?.authorize || operationContext?.allowedAccessLabels !== undefined || operationContext?.tenantId && operationContext.tenantId !== "local" || operationContext?.brainId)) {
+		throw new Error("scoped MCP clients require the configured operation registry");
 	}
 	if (name === "search") {
 		if (typeof args.query !== "string" || !args.query.trim()) throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.searchService(config as Config, args.query, args)) }] };
+		return { content: [{ type: "text", text: JSON.stringify(operationRegistry ? await searchWithRegistry(operationRegistry, args.query, args, { scope: operationContext?.scope ?? "read", ...operationContext }) : await servicesModule.searchService(config as Config, args.query, args)) }] };
 	}
 	if (name === "think") {
 		if (typeof args.question !== "string" || !args.question.trim()) throw new Error("invalid params");
-		return { content: [{ type: "text", text: JSON.stringify(await servicesModule.thinkService(config as Config, args.question)) }] };
+		return { content: [{ type: "text", text: JSON.stringify(operationRegistry ? await operationRegistry.execute({ scope: operationContext?.scope ?? "read", ...operationContext }, "reasoning.answer", { question: args.question }) : await servicesModule.thinkService(config as Config, args.question)) }] };
 	}
+	if (operationRegistry && ["related", "status", "health"].includes(name) && (operationContext?.authorize || operationContext?.allowedAccessLabels !== undefined || operationContext?.tenantId && operationContext.tenantId !== "local" || operationContext?.brainId)) throw new Error("Use the scoped catalog operation for this legacy alias");
 	if (name === "related") {
 		const manasId = args.manasId ?? args.nessieId;
 		if (typeof manasId !== "string") throw new Error("invalid params");
@@ -171,7 +177,9 @@ export async function handleMcpHttpRequest(config: Config | Record<string, never
 	}
 	if (name === "sources_list") {
 		if (Object.keys(args).length) throw new Error("invalid params");
-		const pages = await localBrainRepository().listPages(true);
+		const registry = operationRegistry ?? createBrainRepositoryOperationRegistry(localBrainRepository());
+		const result = await registry.execute({ scope: operationContext?.scope ?? "read", principal: "http", ...operationContext }, "list_pages", operationContext?.authorize || operationContext?.allowedAccessLabels !== undefined ? {} : { includeDeleted: true }) as unknown;
+		const pages = Array.isArray(result) ? result : (result as { pages: Awaited<ReturnType<BrainRepository["listPages"]>> }).pages;
 		const sources = new Map<string, { id: string; documents: number; stale: number }>();
 		for (const page of pages) if (page.source) {
 			const value = sources.get(page.source.type) ?? { id: page.source.type, documents: 0, stale: 0 };
@@ -186,8 +194,26 @@ export async function handleMcpHttpRequest(config: Config | Record<string, never
 	throw new Error("invalid params");
 }
 
-export function serveMcpHttp(_config: Config, options: { port: number; token: string; scopes?: McpScope[]; authorizeToken?: (token: string, scope: McpScope, tenantId?: string) => Promise<boolean>; authorizeOperation?: (principal: { id: string; tenantId: string; userId?: string }, definition: OperationDefinition, input: Record<string, unknown>) => void | OperationAuthorization | Promise<void | OperationAuthorization>; rateLimit?: McpRateLimit; principalForToken?: (token: string) => { id: string; tenantId?: string; userId?: string } | Promise<{ id: string; tenantId?: string; userId?: string } | undefined> | undefined; maxBodyBytes?: number; allowedOrigins?: string[]; allowedHosts?: string[]; sessions?: McpSessionManager; requireSession?: boolean; oauth?: { handle(request: globalThis.Request): Promise<Response> }; operationRegistry?: OperationRegistry }) {
-	if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) throw new Error("invalid HTTP MCP port");
+async function readHttpBody(request: globalThis.Request, maximumBytes?: number): Promise<string> {
+ if (maximumBytes === undefined) return request.text();
+ const reader = request.body?.getReader();
+ if (!reader) return "";
+ const chunks: Uint8Array[] = [];
+ let bytes = 0;
+ try {
+  while (true) {
+   const next = await reader.read();
+   if (next.done) break;
+   bytes += next.value.byteLength;
+   if (bytes > maximumBytes) { void reader.cancel().catch(() => {}); throw Object.assign(new Error("payload too large"), { code: "request_too_large" }); }
+   chunks.push(next.value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+ } finally { reader.releaseLock(); }
+}
+
+export function serveMcpHttp(_config: Config, options: { port?: number; unix?: string; catalogOnly?: boolean; authorizeResponse?: (request: globalThis.Request) => Promise<boolean>; authorizeRequest?: (request: globalThis.Request) => Promise<boolean>; token: string; scopes?: McpScope[]; authorizeToken?: (token: string, scope: McpScope, tenantId?: string) => Promise<boolean>; authorizeOperation?: (principal: { id: string; tenantId: string; userId?: string }, definition: OperationDefinition, input: Record<string, unknown>) => void | OperationAuthorization | Promise<void | OperationAuthorization>; rateLimit?: McpRateLimit; principalForToken?: (token: string) => { id: string; tenantId?: string; userId?: string } | Promise<{ id: string; tenantId?: string; userId?: string } | undefined> | undefined; maxBodyBytes?: number; allowedOrigins?: string[]; allowedHosts?: string[]; sessions?: McpSessionManager; requireSession?: boolean; oauth?: { handle(request: globalThis.Request): Promise<Response> }; operationRegistry?: OperationRegistry }) {
+	if (options.unix ? options.port !== undefined || !options.unix.startsWith(String.fromCharCode(47)) : options.port === undefined || !Number.isInteger(options.port) || options.port < 0 || options.port > 65_535) throw new Error("invalid HTTP MCP port");
 	if (!options.token || options.token.length < 16) throw new Error("HTTP MCP token must be at least 16 characters");
 	if (options.maxBodyBytes !== undefined && (!Number.isInteger(options.maxBodyBytes) || options.maxBodyBytes < 1)) throw new Error("invalid HTTP MCP body limit");
 	const scopes = options.scopes ?? ["read", "write"];
@@ -195,8 +221,7 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 	const limiter = new McpRateLimiter(options.rateLimit ?? { maxRequests: 120, windowMs: 60_000 });
 	const sessions = options.sessions ?? new McpSessionManager();
 	return Bun.serve({
-		hostname: "127.0.0.1",
-		port: options.port,
+		...(options.unix ? { unix: options.unix } : { hostname: "127.0.0.1", port: options.port! }),
 		fetch: async (request) => {
 			if (options.oauth && new URL(request.url).pathname.startsWith("/oauth/")) return options.oauth.handle(request);
 			if (request.method !== "POST") return new Response("method not allowed", { status: 405, headers: { allow: "POST" } });
@@ -210,10 +235,10 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 			if (!options.authorizeToken && token !== options.token) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": "Bearer" } });
 			let body: unknown;
 			try {
-				const bodyText = await request.text();
+				const bodyText = await readHttpBody(request, options.maxBodyBytes);
 				if (options.maxBodyBytes !== undefined && new TextEncoder().encode(bodyText).byteLength > options.maxBodyBytes) return new Response("payload too large", { status: 413 });
 				body = JSON.parse(bodyText);
-			} catch { return response(null, undefined, { code: -32700, message: "parse error" }); }
+			} catch (error) { if ((error as { code?: string }).code === "request_too_large") return new Response("payload too large", { status: 413 }); return response(null, undefined, { code: -32700, message: "parse error" }); }
 			if (!isRecord(body) || body.jsonrpc !== "2.0" || typeof body.method !== "string") return response(null, undefined, { code: -32600, message: "invalid request" });
 			const rpc = body as Request;
 			const sessionId = request.headers.get("mcp-session-id");
@@ -230,6 +255,10 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 			const principal = await options.principalForToken?.(token) ?? { id: token, tenantId: "local" };
 			const allowed = await isMcpTokenAuthorized(token, required, { token: options.token, scopes, tenantId: principal.tenantId, authorizeToken: options.authorizeToken });
 			if (!allowed) return response(rpc.id, undefined, { code: -32603, message: "forbidden" });
+			if (options.authorizeRequest) {
+				try { if (!await options.authorizeRequest(request)) return new Response("forbidden", { status: 403 }); }
+				catch { return new Response("forbidden", { status: 403 }); }
+			}
 			const rate = limiter.check(principal.id, principal.tenantId ?? "local", rpc.method === "tools/call" && isRecord(rpc.params) && typeof rpc.params.name === "string" ? rpc.params.name : rpc.method);
 			if (!rate.allowed) return new Response(JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32029, message: "rate limit exceeded" } }), { status: 429, headers: { "content-type": "application/json", "retry-after": String(Math.ceil(rate.retryAfterMs / 1_000)) } });
 			let startedRequest = false;
@@ -239,9 +268,10 @@ export function serveMcpHttp(_config: Config, options: { port: number; token: st
 				const authorize = options.authorizeOperation ? (definition: OperationDefinition, input: Record<string, unknown>) => options.authorizeOperation!(principalContext, definition, input) : undefined;
 				requestId = rpc.id === undefined || rpc.id === null ? undefined : String(rpc.id);
 				if (options.requireSession && sessionId && requestId && sessions.wasCancelled(sessionId, requestId)) return response(rpc.id, undefined, { code: -32800, message: "request cancelled" });
-				const signal = options.requireSession && sessionId && requestId ? sessions.startRequest(sessionId, requestId) : undefined;
-				startedRequest = Boolean(signal);
-				const result = await handleMcpHttpRequest(_config, rpc, options.operationRegistry, { scope: required, principal: principal.id, tenantId: principal.tenantId ?? "local", ...(principal.userId ? { userId: principal.userId } : {}), ...(authorize ? { authorize } : {}), ...(signal ? { signal } : {}) });
+				const signal = options.requireSession && sessionId && requestId ? sessions.startRequest(sessionId, requestId) : request.signal;
+				startedRequest = Boolean(options.requireSession && sessionId && requestId);
+				const result = await handleMcpHttpRequest(_config, rpc, options.operationRegistry, { scope: required, principal: principal.id, tenantId: principal.tenantId ?? "local", ...(principal.userId ? { userId: principal.userId } : {}), ...(authorize ? { authorize } : {}), ...(signal ? { signal } : {}) }, { catalogOnly: options.catalogOnly });
+				if (options.authorizeResponse && !await options.authorizeResponse(request)) return new Response("forbidden", { status: 403 });
 				if (isMcpNotification(rpc)) return new Response(null, { status: 202 });
 				if (options.requireSession && sessionId && requestId && sessions.wasCancelled(sessionId, requestId)) return response(rpc.id, undefined, { code: -32800, message: "request cancelled" });
 				const output = response(rpc.id, result);

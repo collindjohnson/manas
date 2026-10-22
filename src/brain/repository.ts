@@ -1,5 +1,8 @@
+import { tmpdir } from "node:os";
+import { acquireStoreOwnership, StoreOwnedError } from "./ownership";
+import { MEMORY_SOURCE, memoryState } from "./memory";
 import * as schemaModule from "./schema";
-import { chmod, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -155,8 +158,42 @@ function relativePath(root: string, path: string): string {
 }
 
 async function git(root: string, args: string[], trim = true): Promise<string> {
-	const result = await execFile("git", ["-C", root, ...args], { maxBuffer: 1024 * 1024 });
+	const result = await execFile("git", ["-C", root, ...args], { maxBuffer: 64 * 1024 * 1024 });
 	return trim ? result.stdout.trim() : result.stdout;
+}
+
+// Per-command defaults preserve configured Git fields and environment identities.
+export async function configuredGitIdentityArguments(root: string): Promise<string[]> {
+ const arguments_: string[] = [];
+ const values = await Promise.all(["name", "email"].map(async (field) => {
+  try { return await git(root, ["config", "--get", "user." + field]); }
+  catch (error) { if ((error as { code?: number }).code !== 1) throw error; return ""; }
+ }));
+ for (const [index, field] of ["name", "email"].entries()) if (!values[index]?.trim()) arguments_.push("-c", "user." + field + "=" + (field === "name" ? "Manas" : "manas@localhost"));
+ return arguments_;
+}
+
+export async function preserveGitBytes(root: string, paths: string[]): Promise<void> {
+ const destination = resolve(root, await git(root, ["rev-parse", "--git-path", "info/attributes"]));
+ await mkdir(dirname(destination), { recursive: true });
+ const parent = await lstat(dirname(destination));
+ if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error("Git local attributes directory must be a real directory");
+ let existing = "";
+ try {
+  const info = await lstat(destination);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Git local attributes must be a regular file");
+  existing = await readFile(destination, "utf8");
+ } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+ const rules = paths.map((path) => {
+  const escape = String.fromCharCode(92);
+  const pattern = slash + [...path].map((character) => (escape + "*?[]").includes(character) ? escape + character : character).join("");
+  const quoted = String.fromCharCode(34) + [...Buffer.from(pattern)].map((byte) => byte >= 33 && byte <= 126 && byte !== 34 && byte !== 92 ? String.fromCharCode(byte) : escape + byte.toString(8).padStart(3, "0")).join("") + String.fromCharCode(34);
+  return quoted + " -text -filter -ident -working-tree-encoding";
+ });
+ const newline = String.fromCharCode(10);
+ const lines = new Set(existing.split(newline));
+ const additions = [...new Set(rules)].filter((rule) => !lines.has(rule));
+ if (additions.length) await appendFile(destination, (existing && !existing.endsWith(newline) ? newline : "") + "# Manas authoritative byte preservation" + newline + additions.join(newline) + newline);
 }
 
 async function regularFile(path: string): Promise<void> {
@@ -212,6 +249,22 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 		try { return await action(); } finally { release(); }
 	}
 
+	private async withKernelMutation<T>(action: () => Promise<T>): Promise<T> {
+		const key = createHash("sha256").update(await realpath(this.root)).digest("hex");
+		const directory = join(tmpdir(), "manas-git-" + (process.getuid?.() ?? "local") + "-" + key);
+		await mkdir(directory, { recursive: true, mode: 0o700 });
+		const info = await lstat(directory);
+		if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || process.getuid && info.uid !== process.getuid()) throw new Error("Git mutation lock directory must be owner-only");
+		for (let attempt = 0; attempt < 120; attempt++) {
+			let release: (() => void) | undefined;
+			try { release = await acquireStoreOwnership(directory); }
+			catch (error) { if (!(error instanceof StoreOwnedError)) throw error; }
+			if (release) { try { return await action(); } finally { release(); } }
+			await new Promise<void>((done) => setTimeout(done, 25));
+		}
+		throw Object.assign(new Error("brain repository mutation lease is held by another process"), { code: "brain_busy", retryable: true, suggestedFix: "Wait for the current Git mutation or migration to finish, then retry." });
+	}
+
 	private async withMutationLease<T>(action: () => Promise<T>): Promise<T> {
 		const path = leasePath(this.root);
 		const token = randomUUID();
@@ -230,49 +283,86 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 				try {
-					const lease = JSON.parse(await readFile(path, "utf8")) as { expiresAt?: number };
-					if (typeof lease.expiresAt === "number" && lease.expiresAt < Date.now()) { await unlink(path); continue; }
+					const lease = JSON.parse(await readFile(path, "utf8")) as { expiresAt?: number; pid?: number };
+					let ownerExited = false;
+					if (Number.isSafeInteger(lease.pid) && lease.pid! > 0) {
+						try { process.kill(lease.pid!, 0); } catch (error) { ownerExited = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+					}
+					if (ownerExited || typeof lease.expiresAt === "number" && lease.expiresAt < Date.now()) { await unlink(path); continue; }
 				} catch (readError) { if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue; }
 				await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
 			}
 		}
-		throw new Error("brain repository mutation lease is held by another process");
+		throw Object.assign(new Error("brain repository mutation lease is held by another process"), { code: "brain_busy", retryable: true, suggestedFix: "Wait for the current Git mutation or migration to finish, then retry." });
 	}
 
 	private mutating<T>(action: () => Promise<T>): Promise<T> {
-		return this.serialized(() => this.withMutationLease(action));
+		return this.serialized(() => this.withKernelMutation(() => this.withMutationLease(action)));
+	}
+
+	/** Runs an offline batch under the same crash-released fence as ordinary writes. */
+	async withExclusiveMutation<T>(action: () => Promise<T>): Promise<T> { return this.mutating(action); }
+
+	/** Holds the normal mutation fence while a bounded offline snapshot is copied. */
+	async withConsistentSnapshot<T>(action: (snapshot: BrainSnapshot) => Promise<T>): Promise<T> {
+		return this.mutating(async () => {
+			const started = Date.now();
+			const snapshot = await this.snapshot();
+			const result = await action(snapshot);
+			// Never publish a copy whose lease could have expired during a slow backup.
+			if (Date.now() - started >= leaseDurationMs - 60_000) throw new Error("repository snapshot exceeded its four minute consistency budget; retry with a faster backup destination");
+			if (await this.head() !== snapshot.commit) throw new Error("repository changed during snapshot");
+			return result;
+		});
 	}
 
 	async initialize(): Promise<void> {
 		await this.serialized(async () => {
 			await mkdir(this.root, { recursive: true, mode: 0o700 });
 			await chmod(this.root, 0o700);
-			try { await git(this.root, ["rev-parse", "--is-inside-work-tree"]); } catch { await git(this.root, ["init"]); }
-			for (const directory of DEFAULT_BRAIN_DIRECTORIES) await mkdir(join(this.root, directory), { recursive: true, mode: 0o700 });
-			await mkdir(join(this.root, metadataPath("trash")), { recursive: true, mode: 0o700 });
-			await mkdir(join(this.root, metadataPath(schemaPacksDirectory)), { recursive: true, mode: 0o700 });
-			try { await regularFile(identityPath(this.root)); } catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				const identity: BrainIdentityMetadata = {
-					metadataVersion: 1,
-					brainId: randomUUID(),
-					repositoryId: randomUUID(),
-					generatedContentOwner: "manas",
-					managedSectionOwner: "source-adapters",
-					tombstonePolicy: { mode: "recoverable-trash", retentionDays: 30, deletionTimestampField: "deletedAt" },
-					canonicalRemote: null,
-					protectedBranchPolicy: { branches: ["main", "master"], requireExpectedHead: true, allowForcePush: false, pushMode: "explicit" },
-				};
-				await writeAtomic(identityPath(this.root), `${JSON.stringify(identity)}\n`, undefined, undefined);
-			}
-			try { await regularFile(manifestPath(this.root)); } catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				await writeManifest(this.root, [], this.options.faultInjector);
-			}
-			try { await regularFile(settingsPath(this.root)); } catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				await writeAtomic(settingsPath(this.root), `${JSON.stringify(defaultSettings)}\n`, undefined, undefined);
-			}
+			await this.withKernelMutation(async () => {
+				let ownsWorktree = false;
+				try { ownsWorktree = await realpath(await git(this.root, ["rev-parse", "--show-toplevel"])) === await realpath(this.root); } catch {}
+				// A brain below another checkout must have its own authoritative Git history.
+				if (!ownsWorktree) await git(this.root, ["init"]);
+				for (const directory of DEFAULT_BRAIN_DIRECTORIES) await mkdir(join(this.root, directory), { recursive: true, mode: 0o700 });
+				await mkdir(join(this.root, metadataPath("trash")), { recursive: true, mode: 0o700 });
+				await mkdir(join(this.root, metadataPath(schemaPacksDirectory)), { recursive: true, mode: 0o700 });
+				try { await regularFile(identityPath(this.root)); } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					const identity: BrainIdentityMetadata = {
+						metadataVersion: 1,
+						brainId: randomUUID(),
+						repositoryId: randomUUID(),
+						generatedContentOwner: "manas",
+						managedSectionOwner: "source-adapters",
+						tombstonePolicy: { mode: "recoverable-trash", retentionDays: 30, deletionTimestampField: "deletedAt" },
+						canonicalRemote: null,
+						protectedBranchPolicy: { branches: ["main", "master"], requireExpectedHead: true, allowForcePush: false, pushMode: "explicit" },
+					};
+					await writeAtomic(identityPath(this.root), `${JSON.stringify(identity)}\n`, undefined, undefined);
+				}
+				try { await regularFile(manifestPath(this.root)); } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					await writeManifest(this.root, [], this.options.faultInjector);
+				}
+				try { await regularFile(settingsPath(this.root)); } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					await writeAtomic(settingsPath(this.root), `${JSON.stringify(defaultSettings)}\n`, undefined, undefined);
+				}
+			});
+		});
+	}
+
+
+	/** Establishes an empty canonical snapshot without adopting uncommitted content. */
+	async ensureInitialCommit(): Promise<void> {
+		await this.mutating(async () => {
+			if (await this.head()) return;
+			if ((await loadManifest(this.root)).length) throw Object.assign(new Error("An uncommitted archive import must be resumed before starting the runtime."), { code: "brain_initialization_incomplete", retryable: false, suggestedFix: "Resume the archive migration receipt or choose a fresh brain directory." });
+			const paths = [metadataPath(identityName), metadataPath(manifestName), metadataPath(settingsName)];
+			await this.assertNoOwnedConflicts(paths);
+			await this.commit(paths, "brain: initialize");
 		});
 	}
 
@@ -451,7 +541,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 	}
 
 	private async assertNoOwnedConflicts(paths: string[]): Promise<void> {
-		const status = await git(this.root, ["status", "--porcelain", "--", ...paths]);
+		const status = await git(this.root, ["status", "--porcelain", "--", ...paths.map((path) => ":(literal)" + path)]);
 		if (!status) return;
 		try {
 			await git(this.root, ["rev-parse", "--verify", "HEAD"]);
@@ -471,7 +561,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 		if (await this.head() !== previousHead) return;
 		await restore();
 		try {
-			await git(this.root, ["reset", "--quiet", "--", ...paths]);
+			await git(this.root, ["reset", "--quiet", "--", ...paths.map((path) => ":(literal)" + path)]);
 		} catch {
 			// A repository without a commit has no index to reset. Restored
 			// working-tree bytes are still the authoritative recovery state.
@@ -537,6 +627,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 			}
 			for (const entry of active) {
 				const file = files.find((candidate) => candidate.path === entry.path);
+				if (file && entry.contentHash !== file.hash && entry.source?.type === MEMORY_SOURCE) { warnings.push("memory edit requires memory.correct: " + entry.path); continue; }
 				if (file && entry.contentHash !== file.hash) { entry.contentHash = file.hash; entry.revision = file.hash; changed = true; ownedPaths.add(file.path); }
 			}
 			if (changed) {
@@ -559,7 +650,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 		});
 	}
 
-	async putPage(path: string, content: string, expectedRevision?: string, source?: BrainSourceRecord | string, expectedHead?: string): Promise<MutationResult> {
+	async putPage(path: string, content: string, expectedRevision?: string, source?: BrainSourceRecord | string, expectedHead?: string, importedId?: string): Promise<MutationResult> {
 		return this.mutating(async () => {
 			// Before source metadata was added, the fourth positional argument was
 			// the expected Git head. Keep that call shape working for callers that
@@ -571,7 +662,13 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 			await this.assertNoOwnedConflicts([normalized, metadataPath(manifestName), metadataPath(identityName), metadataPath(settingsName)]);
 			const entries = await loadManifest(this.root);
 			const existing = entries.find((entry) => entry.path === normalized && !entry.deleted);
+			if (existing?.source?.type === MEMORY_SOURCE) {
+				if (sourceRecord?.type !== MEMORY_SOURCE) throw new Error("memory lifecycle operations are required");
+				if (memoryState(existing)?.status === "withdrawn" && memoryState({ source: sourceRecord })?.status !== "withdrawn") throw new Error("withdrawn memory cannot be reactivated");
+			}
+
 			if ((existing && existing.revision !== expectedRevision) || (!existing && expectedRevision !== undefined)) throw new Error("stale brain page revision");
+			if (importedId !== undefined && (existing || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(importedId) || entries.some((entry) => entry.id === importedId))) throw new Error("imported brain page identity is invalid or already exists");
 			const previousHead = await this.head();
 			const pageFile = asPath(this.root, normalized);
 			const originalPage = await readFile(pageFile, "utf8").catch((error) => {
@@ -580,7 +677,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 			});
 			const originalManifest = await readFile(manifestPath(this.root), "utf8");
 			const hash = digest(content);
-			const entry: BrainManifestEntry = { id: existing?.id ?? randomUUID(), path: normalized, contentHash: hash, revision: hash, source: sourceRecord ?? existing?.source, stale: false, accessLabels: sourceRecord?.visibilityLabels ?? existing?.accessLabels };
+			const entry: BrainManifestEntry = { id: existing?.id ?? importedId ?? randomUUID(), path: normalized, contentHash: hash, revision: hash, source: sourceRecord ?? existing?.source, stale: false, accessLabels: sourceRecord?.visibilityLabels ?? existing?.accessLabels };
 			try {
 				await writeAtomic(pageFile, content, { tempFileWrite: "page-temp-file-write", replacement: "page-rename" }, this.options.faultInjector);
 				await writeManifest(this.root, [...entries.filter((item) => item.path !== normalized), entry], this.options.faultInjector);
@@ -648,6 +745,7 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 		await this.assertNoOwnedConflicts([source, target, metadataPath(manifestName)]);
 		const entry = manifest.find((item) => item.path === source);
 		if (!entry || entry.revision !== expectedRevision) throw new Error("stale brain page revision");
+		if (entry.source?.type === MEMORY_SOURCE) throw new Error("memory lifecycle operations are required");
 		if (manifest.some((item) => item.path === target && !item.deleted)) throw new Error("brain page target already exists");
 		const sourceFile = asPath(this.root, source, true);
 		await regularFile(sourceFile);
@@ -665,7 +763,8 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 
 	private async commit(paths: string[], message: string, source?: BrainSourceRecord): Promise<string> {
 		await this.inject("staging");
-		await git(this.root, ["add", "--", ...paths]);
+		await preserveGitBytes(this.root, paths);
+		await git(this.root, ["add", "-f", "--", ...paths.map((path) => ":(literal)" + path)]);
 		const operation = message.startsWith("brain: ") ? message.slice("brain: ".length).split(" ", 1)[0] : "mutation";
 		const sourceLines = source
 			? [
@@ -676,7 +775,8 @@ export class BrainRepository implements AuthoritativeBrainRepository {
 			: "Brain-Source-Type: local";
 		const body = `${message}\n\nBrain-Actor: manas\nBrain-Operation: ${operation}\nBrain-Correlation-ID: ${randomUUID()}\n${sourceLines}`;
 		await this.inject("commit-creation");
-		try { await git(this.root, ["commit", "--only", "-m", body, "--", ...paths]); }
+		const identityArguments = await configuredGitIdentityArguments(this.root);
+		try { await git(this.root, [...identityArguments, "commit", "--only", "-m", body, "--", ...paths.map((path) => ":(literal)" + path)]); }
 		catch (error) { const detail = error as { stderr?: string }; throw new Error(detail.stderr?.includes("identity") ? "Git user identity is required to commit brain changes" : "unable to commit brain change"); }
 		await this.inject("post-commit-cleanup");
 		return git(this.root, ["rev-parse", "HEAD"]);

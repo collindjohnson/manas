@@ -1,0 +1,53 @@
+import { test, expect } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { BrainRepository } from "../src/brain/repository";
+import { openPgliteBrainStore } from "../src/brain/store";
+import { indexBrainRepository, searchVerifiedHybridBrainRepository } from "../src/brain/pglite-indexer";
+import { remember, forget } from "../src/brain/memory";
+import { putOpenLoop } from "../src/brain/open-loops";
+import { enqueueReminder, listReminders, reminderDeliveryHandler } from "../src/brain/reminders";
+import { runOneJob } from "../src/brain/jobs";
+const owner = { scope: "admin" as const, principal: "owner" };
+test("reminders persist owner intent, deduplicate delivery, and suppress withdrawn evidence", async () => {
+ const root = await mkdtemp(join(tmpdir(), "manas-reminders-")), repository = new BrainRepository(join(root, "brain")), store = await openPgliteBrainStore();
+ try {
+  await repository.initialize();
+  execFileSync("git", ["-C", repository.root, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository.root, "config", "user.email", "test@example.invalid"]);
+  const memory = await remember(repository, owner, { text: "Maya will send the Juniper proposal.", idempotencyKey: "fact", provenance: { sourceType: "user" }, visibility: ["private"] });
+  await indexBrainRepository(store, repository);
+  const evidence = (await searchVerifiedHybridBrainRepository(store, repository, "Juniper")).map((hit) => hit.citation);
+  const make = async (key: string) => putOpenLoop(repository, owner, { title: "Send Juniper " + key, participants: ["Maya"], dueAt: "2020-01-01T00:00:00Z", evidence, idempotencyKey: key });
+  const loop = await make("one");
+  await expect(enqueueReminder(repository, store, { scope: "admin", allowedAccessLabels: ["private"] }, { id: loop.id, expectedRevision: loop.revision })).rejects.toMatchObject({ code: "owner_access_required" });
+  const queued = await enqueueReminder(repository, store, owner, { id: loop.id, expectedRevision: loop.revision });
+  expect(await enqueueReminder(repository, store, owner, { id: loop.id, expectedRevision: loop.revision })).toMatchObject({ id: queued.id, jobId: queued.jobId, replayed: true });
+  expect((await listReminders(repository, store, { scope: "read", allowedAccessLabels: [] })).items).toEqual([]);
+  let calls = 0;
+  const handler = reminderDeliveryHandler({ repository, store, workerId: "test", notify: async () => { calls++; } });
+  expect(await runOneJob(store, "test", { "reminder-delivery": handler })).toMatchObject({ status: "complete" });
+  expect(calls).toBe(1);
+  expect((await listReminders(repository, store, owner)).items[0]).toMatchObject({ notification: { phase: "delivered" } });
+  expect(await runOneJob(store, "test", { "reminder-delivery": handler })).toBeUndefined();
+  const interrupted = await make("two");
+  const second = await enqueueReminder(repository, store, owner, { id: interrupted.id, expectedRevision: interrupted.revision });
+  // Crash after phase reservation, before the worker could record the OS outcome.
+  await store.query("UPDATE brain_admin_action_receipts SET result=jsonb_set(result,'{phase}','\"dispatching\"'::jsonb) WHERE id=$1", [second.id]);
+  expect(await runOneJob(store, "test", { "reminder-delivery": handler })).toMatchObject({ status: "complete" });
+  expect(calls).toBe(1);
+  expect((await listReminders(repository, store, owner)).items.find((item) => item.id === interrupted.id)).toMatchObject({ notification: { phase: "uncertain", reason: "dispatch_interrupted" } });
+  const withdrawn = await make("three");
+  const third = await enqueueReminder(repository, store, owner, { id: withdrawn.id, expectedRevision: withdrawn.revision });
+  await forget(repository, owner, { id: memory.id, expectedRevision: memory.revision, idempotencyKey: "withdraw" });
+  await indexBrainRepository(store, repository);
+  expect(await runOneJob(store, "test", { "reminder-delivery": handler })).toMatchObject({ status: "complete" });
+  expect(calls).toBe(1);
+  expect((await listReminders(repository, store, owner)).items).toEqual([]);
+  const receipt = (await store.query<{ result: unknown }>("SELECT result FROM brain_admin_action_receipts WHERE id=$1", [third.id]))[0]!.result;
+  expect(receipt).toMatchObject({ phase: "suppressed", reason: "evidence_unavailable" });
+  expect(JSON.stringify(receipt)).not.toContain("Juniper");
+ } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+}, 20000);
